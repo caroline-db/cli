@@ -41,11 +41,16 @@ func (d *DeploymentUnit) Deploy(ctx context.Context, db *dstate.DeploymentState,
 	}
 
 	oldID := db.GetResourceID(d.ResourceKey)
+	if planEntry.Import {
+		oldID = planEntry.ID
+	}
 	if oldID == "" {
 		return errors.New("state entry not found")
 	}
 
 	switch actionType {
+	case deployplan.Skip:
+		return d.saveState(ctx, db, oldID, newState, d.DependsOn)
 	case deployplan.Recreate:
 		return d.Recreate(ctx, db, oldID, newState)
 	case deployplan.Update:

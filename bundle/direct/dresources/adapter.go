@@ -83,6 +83,11 @@ type IResource interface {
 	// Example: func (*ResourceGrants) IsEmptyState(state *GrantsState) bool
 	IsEmptyState(newState any) bool
 
+	// [Optional] ImportID returns the ID of an existing resource to read before its first
+	// deployment. Called only with fully resolved state; an empty ID disables import.
+	// Example: func (*ResourceGrants) ImportID(state *GrantsState) string
+	ImportID(newState any) string
+
 	// [Optional] DoUpdate updates the resource. ID must not change as a result of this operation. Returns optionally remote state.
 	// If remote state is available as part of the operation, return it; otherwise return nil.
 	// Example: func (r *ResourceSchema) DoUpdate(ctx context.Context, id string, newState *catalog.CreateSchema, entry *PlanEntry) (*catalog.SchemaInfo, error)
@@ -133,6 +138,7 @@ type Adapter struct {
 	doDelete           *calladapt.BoundCaller
 	prepareInputConfig *calladapt.BoundCaller
 	isEmptyState       *calladapt.BoundCaller
+	importID           *calladapt.BoundCaller
 	doUpdate           *calladapt.BoundCaller
 	doUpdateWithID     *calladapt.BoundCaller
 	waitAfterCreate    *calladapt.BoundCaller
@@ -174,6 +180,7 @@ func NewAdapter(typedNil any, resourceType string, client *databricks.WorkspaceC
 		doCreate:                nil,
 		prepareInputConfig:      nil,
 		isEmptyState:            nil,
+		importID:                nil,
 		doUpdate:                nil,
 		doUpdateWithID:          nil,
 		doResize:                nil,
@@ -264,6 +271,11 @@ func (a *Adapter) initMethods(resource any) error {
 	}
 
 	a.isEmptyState, err = calladapt.PrepareCall(resource, reflect.TypeFor[IResource](), "IsEmptyState")
+	if err != nil {
+		return err
+	}
+
+	a.importID, err = calladapt.PrepareCall(resource, reflect.TypeFor[IResource](), "ImportID")
 	if err != nil {
 		return err
 	}
@@ -383,6 +395,9 @@ func (a *Adapter) validate() error {
 
 	if a.isEmptyState != nil {
 		validations = append(validations, "IsEmptyState newState", a.isEmptyState.InTypes[0], stateType)
+	}
+	if a.importID != nil {
+		validations = append(validations, "ImportID newState", a.importID.InTypes[0], stateType)
 	}
 
 	// Validate DoUpdate: must return (remoteType, error) if implemented
@@ -600,6 +615,18 @@ func (a *Adapter) IsEmptyState(newState any) (bool, error) {
 		return false, err
 	}
 	return outs[0].(bool), nil
+}
+
+// ImportID returns the resource's config-derived ID, or an empty string if import is unsupported.
+func (a *Adapter) ImportID(newState any) (string, error) {
+	if a.importID == nil {
+		return "", nil
+	}
+	outs, err := a.importID.Call(newState)
+	if err != nil {
+		return "", err
+	}
+	return outs[0].(string), nil
 }
 
 // HasDoUpdate returns true if the resource implements DoUpdate method.

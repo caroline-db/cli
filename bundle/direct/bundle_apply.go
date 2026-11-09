@@ -136,9 +136,9 @@ func (b *DeploymentBundle) Apply(ctx context.Context, client *databricks.Workspa
 			return true
 		}
 
-		// We don't keep NewState around for 'skip' nodes
+		// Imported skip nodes retain NewState so apply can record their adoption.
 
-		if action != deployplan.Skip {
+		if action != deployplan.Skip || entry.Import {
 			if !b.resolveReferences(ctx, resourceKey, entry, errorPrefix, false) {
 				return false
 			}
@@ -173,7 +173,7 @@ func (b *DeploymentBundle) Apply(ctx context.Context, client *databricks.Workspa
 
 			// Reported before the remote-state refresh below: the resource is already
 			// deployed at this point, so the line is accurate even if the refresh fails.
-			if reportApplied {
+			if reportApplied && action != deployplan.Skip {
 				cmdio.LogString(ctx, deployplan.AppliedLine(resourceKey, action))
 			}
 		}

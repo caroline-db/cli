@@ -53,6 +53,16 @@ If a desired state describes no resource at all (e.g. an empty grants list), imp
 
 The planner only consults it for nodes without a state entry: once state exists the node stays in the plan, so emptying it still plans an update, and the update is what removes the entry.
 
+## Adopting existing resources: ImportID
+
+Implement `ImportID` when a resource's identity comes from its resolved config and
+the first deployment should manage what already exists at that ID (grants, for
+example). The planner calls it only without a saved ID and with no unresolved
+references. An empty ID opts out; a missing remote resource plans a create.
+
+Planning only reads the resource. Apply persists the adopted state even when the
+remote already matches and no API update is needed, including for saved plans.
+
 ## Config that is not the state: Configure and PrepareInputConfig
 
 Most resources take their bundle config straight into `PrepareState`. Sub-resources (permissions, grants) cannot: their state is assembled from the parent's config section plus a reference to the parent's ID, which has no source in the config.

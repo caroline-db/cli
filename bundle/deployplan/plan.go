@@ -122,6 +122,9 @@ type PlanEntry struct {
 	ID        string           `json:"id,omitempty"`
 	DependsOn []DependsOnEntry `json:"depends_on,omitempty"`
 	Action    ActionType       `json:"action,omitempty"`
+	// Import marks a resource found remotely without a state entry. Apply records its
+	// state even when Action is Skip, so later edits can revoke adopted grants.
+	Import bool `json:"import,omitempty"`
 	// Gone is set on Delete entries when planning confirmed the resource no longer
 	// exists remotely. Applying such an entry only removes it from the state, without
 	// calling the delete API, and approval prompts do not list it as a deletion.

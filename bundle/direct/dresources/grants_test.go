@@ -184,6 +184,27 @@ func TestIsEmptyStateNotImplemented(t *testing.T) {
 	assert.False(t, empty)
 }
 
+func TestImportID(t *testing.T) {
+	tests := []struct {
+		resourceType string
+		state        any
+		id           string
+	}{
+		{"schemas.grants", &GrantsState{SecurableType: "schema", FullName: "main.foo"}, "schema/main.foo"},
+		{"catalogs.grants", &GrantsState{SecurableType: "catalog", FullName: "main"}, "catalog/main"},
+		{"schemas", &catalog.CreateSchema{Name: "foo", CatalogName: "main"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.resourceType, func(t *testing.T) {
+			adapter, err := NewAdapter(SupportedResources[tt.resourceType], tt.resourceType, nil)
+			require.NoError(t, err)
+			id, err := adapter.ImportID(tt.state)
+			require.NoError(t, err)
+			assert.Equal(t, tt.id, id)
+		})
+	}
+}
+
 func TestNormalizeAssignments(t *testing.T) {
 	tests := []struct {
 		name     string

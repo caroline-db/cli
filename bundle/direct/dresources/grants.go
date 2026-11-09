@@ -89,6 +89,11 @@ func (*ResourceGrants) IsEmptyState(state *GrantsState) bool {
 	return len(state.EmbeddedSlice) == 0
 }
 
+// ImportID identifies grants by their resolved parent so the first plan can include existing assignments.
+func (*ResourceGrants) ImportID(state *GrantsState) string {
+	return makeGrantsID(state)
+}
+
 func grantKey(x catalog.PrivilegeAssignment) (string, string) {
 	return "principal", x.Principal
 }
