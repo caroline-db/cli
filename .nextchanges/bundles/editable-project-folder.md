@@ -1,0 +1,1 @@
+* With `DATABRICKS_BUNDLE_ENABLE_EXPERIMENTAL_PIPELINE_TESTING=true`, a local project folder after `-e` in job and pipeline environment dependencies, such as `-e ./project[test]`, maps to its deployed folder. Without the variable, the behavior does not change. ([#7427](https://github.com/databricks/cli/pull/7427), [#7439](https://github.com/databricks/cli/pull/7439))
