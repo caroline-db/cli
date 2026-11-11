@@ -1,22 +1,27 @@
 package aircmd
 
 import (
+	"context"
 	"fmt"
 	"strings"
+
+	"github.com/databricks/cli/cmd/root"
 
 	"github.com/spf13/cobra"
 )
 
-// New returns the root command for the AI Runtime CLI.
-func New() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     "air",
-		Short:   "*Public Preview* Run and manage AI Runtime training workloads",
-		GroupID: "development",
-		Long: `Run and manage AI Runtime training workloads on Databricks serverless GPU compute.
+// Spec declares the air command.
+var Spec = root.Spec{
+	Use:     "air",
+	Short:   "*Public Preview* Run and manage AI Runtime training workloads",
+	GroupID: "development",
+	Build:   buildCommand,
+}
 
-These commands are under active development.`,
-	}
+func buildCommand(ctx context.Context, cmd *cobra.Command) {
+	cmd.Long = `Run and manage AI Runtime training workloads on Databricks serverless GPU compute.
+
+These commands are under active development.`
 
 	runCommand := newRunCommand()
 	wrapRunErrorWithDebugTip(runCommand)
@@ -28,8 +33,6 @@ These commands are under active development.`,
 	cmd.AddCommand(newCancelCommand())
 	cmd.AddCommand(newConvertToDabsCommand())
 	cmd.AddCommand(newImagesCommand())
-
-	return cmd
 }
 
 func wrapRunErrorWithDebugTip(cmd *cobra.Command) {

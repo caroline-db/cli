@@ -24,7 +24,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func New(ctx context.Context) *cobra.Command {
+func newCommand(ctx context.Context) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "databricks",
 		Short:   "Databricks CLI",
@@ -113,10 +113,9 @@ func flagErrorFunc(c *cobra.Command, err error) error {
 	return fmt.Errorf("%w\n\n%s", err, c.UsageString())
 }
 
-// Execute runs the command that args resolve to. It is called by main.main()
-// with the process arguments. Unlike [cobra.Command.SetArgs], nil args mean no
+// execute runs the command that args resolve to. Unlike [cobra.Command.SetArgs], nil args mean no
 // arguments rather than the process arguments.
-func Execute(ctx context.Context, cmd *cobra.Command, args []string) (err error) {
+func execute(ctx context.Context, cmd *cobra.Command, args []string) (err error) {
 	defer func() {
 		r := recover()
 

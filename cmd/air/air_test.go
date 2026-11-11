@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/databricks/cli/cmd/root"
+
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 )
@@ -12,7 +14,7 @@ import (
 // expected subcommand, so none is accidentally dropped from New.
 func TestNewRegistersAllSubcommands(t *testing.T) {
 	registered := make(map[string]bool)
-	for _, c := range New().Commands() {
+	for _, c := range root.NewCommand(t.Context(), Spec).Commands() {
 		registered[c.Name()] = true
 	}
 
@@ -24,7 +26,7 @@ func TestNewRegistersAllSubcommands(t *testing.T) {
 }
 
 func TestNewHelpMetadata(t *testing.T) {
-	cmd := New()
+	cmd := root.NewCommand(t.Context(), Spec)
 
 	assert.Equal(t, "development", cmd.GroupID)
 	assert.Contains(t, cmd.Short, "*Public Preview*")
