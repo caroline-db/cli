@@ -21,7 +21,7 @@ func (d *DeploymentUnit) withResourceKey(ctx context.Context) context.Context {
 	return dresources.WithResourceKey(ctx, strings.TrimPrefix(d.ResourceKey, "resources."))
 }
 
-func (d *DeploymentUnit) Destroy(ctx context.Context, db *dstate.DeploymentState) error {
+func (d *DeploymentUnit) Destroy(ctx context.Context, db *dstate.DeploymentState, entry *deployplan.PlanEntry) error {
 	ctx = log.WithPrefix(ctx, "destroying "+d.ResourceKey)
 	ctx = d.withResourceKey(ctx)
 	id := db.GetResourceID(d.ResourceKey)
@@ -30,7 +30,7 @@ func (d *DeploymentUnit) Destroy(ctx context.Context, db *dstate.DeploymentState
 		return nil
 	}
 
-	return d.Delete(ctx, db, id)
+	return d.Delete(ctx, db, id, entry)
 }
 
 func (d *DeploymentUnit) Deploy(ctx context.Context, db *dstate.DeploymentState, newState any, actionType deployplan.ActionType, planEntry *deployplan.PlanEntry) error {
@@ -47,7 +47,7 @@ func (d *DeploymentUnit) Deploy(ctx context.Context, db *dstate.DeploymentState,
 
 	switch actionType {
 	case deployplan.Recreate:
-		return d.Recreate(ctx, db, oldID, newState)
+		return d.Recreate(ctx, db, oldID, newState, planEntry)
 	case deployplan.Update:
 		return d.Update(ctx, db, oldID, newState, planEntry)
 	case deployplan.UpdateWithID:
@@ -111,7 +111,7 @@ func (d *DeploymentUnit) Create(ctx context.Context, db *dstate.DeploymentState,
 	return nil
 }
 
-func (d *DeploymentUnit) Recreate(ctx context.Context, db *dstate.DeploymentState, oldID string, newState any) error {
+func (d *DeploymentUnit) Recreate(ctx context.Context, db *dstate.DeploymentState, oldID string, newState any, entry *deployplan.PlanEntry) error {
 	oldState, err := d.loadPersistedState(db)
 	if err != nil {
 		return err
@@ -124,7 +124,8 @@ func (d *DeploymentUnit) Recreate(ctx context.Context, db *dstate.DeploymentStat
 	_, err = retry.With(ctx, retry.IsTransient, func() (struct{}, error) {
 		return struct{}{}, d.Adapter.DoDelete(ctx, oldID, oldState)
 	})
-	if err != nil && !apierr.IsMissing(err) && !isManagedByParent(err) {
+	managedByParent := isManagedByParent(err)
+	if err != nil && !apierr.IsMissing(err) && !managedByParent {
 		if !d.deleteConfirmedGone(ctx, oldID) {
 			return fmt.Errorf("deleting old id=%s: %w", oldID, err)
 		}
@@ -152,6 +153,7 @@ func (d *DeploymentUnit) Recreate(ctx context.Context, db *dstate.DeploymentStat
 	if err != nil && !apierr.IsMissing(err) {
 		return fmt.Errorf("waiting after deleting id=%s: %w", oldID, err)
 	}
+	entry.RecreateDeleted = !managedByParent
 
 	return d.Create(ctx, db, newState)
 }
@@ -257,19 +259,21 @@ func (d *DeploymentUnit) UpdateWithID(ctx context.Context, db *dstate.Deployment
 	return nil
 }
 
-func (d *DeploymentUnit) Delete(ctx context.Context, db *dstate.DeploymentState, oldID string) error {
+func (d *DeploymentUnit) Delete(ctx context.Context, db *dstate.DeploymentState, oldID string, entry *deployplan.PlanEntry) error {
 	oldState, err := d.loadPersistedState(db)
 	if err != nil {
 		return err
 	}
 
 	err = d.Adapter.DoDelete(ctx, oldID, oldState)
+	unbound := isManagedByParent(err)
 	if err != nil && !apierr.IsMissing(err) && !isManagedByParent(err) {
 		// Rather than failing delete and requiring user to unbind, we perform unbind automatically there.
 		// Some services, e.g. jobs, return 403 for missing resources if caller did not have permissions to it when job existed.
 		// In those cases 403 hides 404. In other cases, user not having permissions to resource but having in the bundle might
 		// mean configuration error that user is trying to fix by removing resource from their bundle.
 		if errors.Is(err, apierr.ErrPermissionDenied) {
+			unbound = true
 			log.Warnf(ctx, "Ignoring permission error when deleting %s id=%s: %s", d.ResourceKey, oldID, err)
 		} else if d.deleteConfirmedGone(ctx, oldID) {
 			log.Warnf(ctx, "Treating %s id=%s as already deleted despite delete error: %s", d.ResourceKey, oldID, err)
@@ -278,6 +282,8 @@ func (d *DeploymentUnit) Delete(ctx context.Context, db *dstate.DeploymentState,
 			err = fmt.Errorf("deleting id=%s: %w", oldID, err)
 			db.RecordFailure(d.ResourceKey, oldID, err)
 			return err
+		} else {
+			unbound = true
 		}
 	}
 
@@ -285,6 +291,7 @@ func (d *DeploymentUnit) Delete(ctx context.Context, db *dstate.DeploymentState,
 	if err != nil {
 		return fmt.Errorf("deleting state id=%s: %w", oldID, err)
 	}
+	entry.Unbound = unbound
 
 	// Wait for asynchronous teardown after dropping state. Mirrors Recreate so
 	// the contract is the same regardless of whether the user triggered

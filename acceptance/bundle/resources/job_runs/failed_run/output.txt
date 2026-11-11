@@ -69,7 +69,7 @@ run page: [RUN_URL]
 Error: cannot create resources.jobs.downstream_job: dependency failed: resources.job_runs.my_run
 
 Files: 0 uploaded, 0 deleted
-Resources: 0 created, 0 changed, 0 deleted, 1 unchanged, 2 failed
+Resources: 0 created, 0 changed, 1 deleted, 1 unchanged, 2 failed
 
 === run-now was issued once per deploy, and the recreate left the failed run alone
 

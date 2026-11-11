@@ -81,11 +81,12 @@ func (p *Plan) CountActions() ActionCounts {
 	return c
 }
 
-// AppliedCounts is CountActions restricted to what actually happened during Apply,
-// plus the number of operations that were planned but did not succeed.
+// AppliedCounts reports completed operations, failed attempts, and resources
+// removed from state without confirmed remote deletion.
 type AppliedCounts struct {
 	ActionCounts
-	Failed int
+	Failed  int
+	Unbound int
 }
 
 // CountApplied tallies the plan by outcome rather than by plan: a create/change/delete
@@ -93,7 +94,8 @@ type AppliedCounts struct {
 // operation that was attempted but not applied (it errored, or a failed dependency
 // skipped it) is counted as Failed, and one Apply never reached is counted as neither.
 // Skips are unchanged regardless, since they run no backend operation; state-only deletes
-// are excluded entirely, matching CountActions.
+// are excluded entirely, matching CountActions. A failed recreate can still count a
+// completed deletion, and ignored delete errors count as Unbound instead of Delete.
 func (p *Plan) CountApplied() AppliedCounts {
 	var c AppliedCounts
 	for _, entry := range p.Plan {
@@ -114,16 +116,20 @@ func (p *Plan) CountApplied() AppliedCounts {
 			if entry.IsStateOnlyDelete() {
 				continue
 			}
-			if entry.Applied {
+			if entry.Unbound {
+				c.Unbound++
+			} else if entry.Applied {
 				c.Delete++
-			} else if entry.Attempted {
+			}
+			if entry.Attempted && !entry.Applied {
 				c.Failed++
 			}
 		case Recreate:
-			// A recreate is one unit: on success it counts as both a delete and a
-			// create, on failure as a single failed operation.
-			if entry.Applied {
+			// The old resource can be gone even if creating its replacement failed.
+			if entry.RecreateDeleted {
 				c.Delete++
+			}
+			if entry.Applied {
 				c.Create++
 			} else if entry.Attempted {
 				c.Failed++
@@ -192,13 +198,19 @@ type PlanEntry struct {
 	Changes     Changes                  `json:"changes,omitempty"`
 
 	// Attempted is set when Apply starts processing this entry (the apply graph ran and
-	// reached this node); Applied is set when its backend operation then succeeded. Both
+	// reached this node); Applied is set when its operation completes, including unbinding. Both
 	// are runtime-only (never serialized). Together they let the deploy/destroy summaries
 	// report what actually happened - applied, or attempted-but-failed - rather than the
 	// planned count. An entry Apply never reached (e.g. a config error bailed out before
 	// the graph ran) has neither set and is reported as neither applied nor failed.
 	Attempted bool `json:"-"`
 	Applied   bool `json:"-"`
+	// RecreateDeleted records completion of a recreate's delete step, even if
+	// creating the replacement subsequently fails.
+	RecreateDeleted bool `json:"-"`
+	// Unbound means a delete only removed the state entry: the API rejected the
+	// delete and the engine ignored that error without confirming remote deletion.
+	Unbound bool `json:"-"`
 }
 
 // IsStateOnlyDelete reports whether applying this delete only drops the state entry
@@ -304,6 +316,7 @@ func (p *Plan) GetActions() []Action {
 			StateOnly:   entry.StateOnly,
 			Attempted:   entry.Attempted,
 			Applied:     entry.Applied,
+			Unbound:     entry.Unbound,
 		})
 	}
 

@@ -103,19 +103,39 @@ func TestCountApplied(t *testing.T) {
 			want:  deployplan.AppliedCounts{Failed: 1},
 		},
 		{
+			name:  "ignored delete error only removes state",
+			entry: deployplan.PlanEntry{Action: deployplan.Delete, Attempted: true, Applied: true, Unbound: true},
+			want:  deployplan.AppliedCounts{Unbound: 1},
+		},
+		{
+			name:  "wait failure after unbinding still reports state removal",
+			entry: deployplan.PlanEntry{Action: deployplan.Delete, Attempted: true, Unbound: true},
+			want:  deployplan.AppliedCounts{Unbound: 1, Failed: 1},
+		},
+		{
 			name:  "state-only delete is excluded",
 			entry: deployplan.PlanEntry{Action: deployplan.Delete, StateOnly: true, Attempted: true},
 			want:  deployplan.AppliedCounts{},
 		},
 		{
 			name:  "recreate applied counts as both create and delete",
-			entry: deployplan.PlanEntry{Action: deployplan.Recreate, Attempted: true, Applied: true},
+			entry: deployplan.PlanEntry{Action: deployplan.Recreate, Attempted: true, Applied: true, RecreateDeleted: true},
 			want:  deployplan.AppliedCounts{ActionCounts: deployplan.ActionCounts{Create: 1, Delete: 1}},
 		},
 		{
-			name:  "recreate failed counts as a single failure",
+			name:  "recreate parent-managed resource without deleting it",
+			entry: deployplan.PlanEntry{Action: deployplan.Recreate, Attempted: true, Applied: true},
+			want:  deployplan.AppliedCounts{ActionCounts: deployplan.ActionCounts{Create: 1}},
+		},
+		{
+			name:  "recreate delete failed",
 			entry: deployplan.PlanEntry{Action: deployplan.Recreate, Attempted: true},
 			want:  deployplan.AppliedCounts{Failed: 1},
+		},
+		{
+			name:  "recreate create failed after deleting old resource",
+			entry: deployplan.PlanEntry{Action: deployplan.Recreate, Attempted: true, RecreateDeleted: true},
+			want:  deployplan.AppliedCounts{ActionCounts: deployplan.ActionCounts{Delete: 1}, Failed: 1},
 		},
 		{
 			name:  "skip is unchanged regardless of attempt",
