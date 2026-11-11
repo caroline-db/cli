@@ -642,3 +642,76 @@ func TestRunAgentCmdReportsTimeout(t *testing.T) {
 	assert.Equal(t, ReasonCLINotOnPath, blocked.Reason)
 	assert.Equal(t, "timed out after 1ms", blocked.Detail)
 }
+
+// copilotPluginHelp is the shape of `copilot plugin --help`.
+const copilotPluginHelp = "Usage: copilot plugin [options] [command]\n\nManage plugins\n\nCommands:\n  install <plugin>     Install a plugin\n  uninstall <plugin>   Uninstall a plugin\n  marketplace          Manage marketplaces\n"
+
+func TestProbeWindowsShimPrintedHelp(t *testing.T) {
+	tests := []struct {
+		name   string
+		goos   string
+		bin    string
+		stdout string
+		accept bool
+	}{
+		{name: "windows .bat shim printed help and exited 1", goos: "windows", bin: `C:\npm\copilot.bat`, stdout: copilotPluginHelp, accept: true},
+		{name: "windows .cmd shim printed help and exited 1", goos: "windows", bin: `C:\npm\codex.cmd`, stdout: copilotPluginHelp, accept: true},
+		{name: "same output off windows is a real failure", goos: "linux", bin: "/usr/bin/copilot", stdout: copilotPluginHelp},
+		{name: "windows .exe is not a shim", goos: "windows", bin: `C:\bin\copilot.exe`, stdout: copilotPluginHelp},
+		{name: "error that mentions both words", goos: "windows", bin: `C:\npm\copilot.bat`, stdout: "Error: cannot install plugins: marketplace disabled by policy\n"},
+		{name: "usage line without a command list", goos: "windows", bin: `C:\npm\copilot.bat`, stdout: "Usage: copilot plugin\nerror: install and marketplace are not available\n"},
+		{name: "unindented words after blank lines", goos: "windows", bin: `C:\npm\copilot.bat`, stdout: "Usage: copilot plugin [options]\n\nmarketplace: disabled by policy\n\ninstall is not permitted\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := probeGOOS
+			t.Cleanup(func() { probeGOOS = orig })
+			probeGOOS = tc.goos
+			origLook := lookPath
+			t.Cleanup(func() { lookPath = origLook })
+			lookPath = func(string) (string, error) { return tc.bin, nil }
+
+			ctx, stub := process.WithStub(t.Context())
+			stub.WithCallback(func(*exec.Cmd) error { return nil })
+			stub.WithStdoutFor("plugin --help", tc.stdout)
+			stub.WithFailureFor("plugin --help", errors.New("exit status 1"))
+
+			_, err := InstallPluginForAgent(ctx, pluginAgent(agents.NameCopilot, "GitHub Copilot", "copilot"), "", "v0.2.6")
+			if tc.accept {
+				require.NoError(t, err)
+				return
+			}
+			var be *BlockedError
+			require.ErrorAs(t, err, &be)
+			assert.Equal(t, ReasonCLINotOnPath, be.Reason)
+			assert.Len(t, stub.Commands(), 1, "nothing runs after a failed probe")
+		})
+	}
+}
+
+func TestWindowsShimPrintedHelpRejectsTimeout(t *testing.T) {
+	orig := probeGOOS
+	t.Cleanup(func() { probeGOOS = orig })
+	probeGOOS = "windows"
+
+	// A shim that printed the help and then hung until its deadline is not a
+	// working CLI, even though the same output without the timeout is accepted.
+	perr := &process.ProcessError{Command: "copilot.bat plugin --help", Err: errors.New("exit status 1"), Stdout: copilotPluginHelp}
+	bin := `C:\npm\copilot.bat`
+	assert.True(t, windowsShimPrintedHelp(bin, perr))
+	assert.False(t, windowsShimPrintedHelp(bin, &agentCmdTimeoutError{timeout: time.Second, err: perr}))
+}
+
+func TestProbeRejectsCLIWithoutPluginCommand(t *testing.T) {
+	stubAgentLookPath(t, true)
+	ctx, stub := process.WithStub(t.Context())
+	stub.WithCallback(func(*exec.Cmd) error { return nil })
+	stub.WithStdoutFor("plugin --help", "error: unknown command 'plugin'\n")
+	stub.WithFailureFor("plugin --help", errors.New("exit status 1"))
+
+	_, err := InstallPluginForAgent(ctx, codexAgent(), "", "v0.2.6")
+	var be *BlockedError
+	require.ErrorAs(t, err, &be)
+	assert.Equal(t, ReasonCLINotOnPath, be.Reason)
+	assert.Len(t, stub.Commands(), 1, "nothing runs after a failed probe")
+}

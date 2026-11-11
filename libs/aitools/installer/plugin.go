@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"maps"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -263,10 +266,46 @@ func probePluginCLI(ctx context.Context, agent *agents.Agent) (string, error) {
 	if err != nil {
 		return "", &BlockedError{Agent: agent.Name, Reason: ReasonCLINotOnPath, Detail: err.Error()}
 	}
-	if _, err := runAgentCmd(ctx, pluginProbeTimeout, []string{bin, "plugin", "--help"}); err != nil {
+	if _, err := runAgentCmd(ctx, pluginProbeTimeout, []string{bin, "plugin", "--help"}); err != nil && !windowsShimPrintedHelp(bin, err) {
 		return "", newBlockedError(agent, ReasonCLINotOnPath, err)
 	}
 	return bin, nil
+}
+
+// probeGOOS is runtime.GOOS; tests replace it to exercise the Windows path.
+var probeGOOS = runtime.GOOS
+
+// pluginHelpUsage and pluginHelpCommand match the help that `<agent> plugin
+// --help` prints: a "Usage: <bin> plugin" line and an indented command list
+// that includes install and marketplace. An error message that merely
+// mentions those words has neither shape.
+var (
+	pluginHelpUsage   = regexp.MustCompile(`(?im)^usage:[ \t]+\S+[ \t]+plugin\b`)
+	pluginHelpInstall = regexp.MustCompile(`(?m)^[ \t]+(install|add)\b`)
+	pluginHelpMarket  = regexp.MustCompile(`(?m)^[ \t]+marketplace\b`)
+)
+
+// windowsShimPrintedHelp reports whether a failed probe is the Windows shim
+// quirk: codex.cmd and copilot.bat can print the full `plugin --help` and then
+// exit 1, which marked a working CLI as missing. It is deliberately narrow: Windows only, a
+// .cmd/.bat shim only, never a timeout, and only when the output is the help
+// itself, so a real failure on any platform still blocks the install.
+func windowsShimPrintedHelp(bin string, err error) bool {
+	if probeGOOS != "windows" {
+		return false
+	}
+	if ext := strings.ToLower(filepath.Ext(bin)); ext != ".cmd" && ext != ".bat" {
+		return false
+	}
+	if _, ok := errors.AsType[*agentCmdTimeoutError](err); ok {
+		return false
+	}
+	perr, ok := errors.AsType[*process.ProcessError](err)
+	if !ok {
+		return false
+	}
+	out := perr.Stdout + "\n" + perr.Stderr
+	return pluginHelpUsage.MatchString(out) && pluginHelpInstall.MatchString(out) && pluginHelpMarket.MatchString(out)
 }
 
 // InstallPluginForAgent registers the databricks marketplace and installs the

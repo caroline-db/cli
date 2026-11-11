@@ -1,0 +1,1 @@
+* `databricks aitools install` on Windows accepts a coding agent CLI shim (`.cmd` or `.bat`) that prints its plugin help and then exits with an error, instead of reporting the CLI as not on PATH. ([#7476](https://github.com/databricks/cli/pull/7476))
