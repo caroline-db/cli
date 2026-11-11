@@ -1,0 +1,1 @@
+* `databricks aitools install` and `databricks aitools update` refresh only the marketplace the Databricks plugin is listed in, so another unreachable marketplace no longer blocks them. When that refresh fails, `aitools install` warns and installs from the local copy, recording the plugin version as unknown. ([#7473](https://github.com/databricks/cli/pull/7473))

@@ -105,11 +105,7 @@ func recordedInstallTarget(agent *agents.Agent, rec PluginRecord) string {
 	if plugin == "" {
 		plugin = agent.Plugin.ID
 	}
-	marketplace := rec.Marketplace
-	if marketplace == "" {
-		marketplace = agent.Plugin.Marketplace
-	}
-	return plugin + "@" + marketplace
+	return plugin + "@" + recordedMarketplace(agent, rec)
 }
 
 // marketplaceAddArgs builds the `plugin marketplace add <source>` argv (sans binary).
@@ -137,19 +133,27 @@ func marketplaceRemoveArgs(spec *agents.PluginSpec) []string {
 }
 
 func marketplaceRemoveArgsForRecord(agent *agents.Agent, rec PluginRecord) []string {
-	marketplace := rec.Marketplace
-	if marketplace == "" {
-		marketplace = agent.Plugin.Marketplace
+	return []string{"plugin", "marketplace", "remove", recordedMarketplace(agent, rec)}
+}
+
+// recordedMarketplace is the marketplace a recorded install came from, or the
+// agent's current one for records written before it was stored.
+func recordedMarketplace(agent *agents.Agent, rec PluginRecord) string {
+	if rec.Marketplace != "" {
+		return rec.Marketplace
 	}
-	return []string{"plugin", "marketplace", "remove", marketplace}
+	return agent.Plugin.Marketplace
 }
 
 // marketplaceUpdateArgs builds the marketplace refresh command for agents whose
 // plugin CLI supports it. Claude's official marketplace can be stale locally,
 // causing install/update to report that a published plugin does not exist.
-func marketplaceUpdateArgs(agent *agents.Agent) []string {
+// The refresh names the marketplace: without a name Claude refreshes every
+// marketplace the user has added, and one unreachable third-party marketplace
+// then fails the databricks install.
+func marketplaceUpdateArgs(agent *agents.Agent, marketplace string) []string {
 	if agent.Name == agents.NameClaudeCode {
-		return []string{"plugin", "marketplace", "update"}
+		return []string{"plugin", "marketplace", "update", marketplace}
 	}
 	return nil
 }
@@ -173,18 +177,20 @@ func pluginInstallArgs(agent *agents.Agent, scope string) []string {
 }
 
 // pluginUpdateSteps builds the ordered per-agent update argv sets (sans binary).
-// Codex updates in two steps: refresh the marketplace, then re-add.
+// Codex updates in two steps: refresh the marketplace, then re-add. Both agents
+// name the marketplace in the refresh, so an unreachable marketplace the user
+// added for another plugin does not fail the update.
 func pluginUpdateSteps(agent *agents.Agent, rec PluginRecord) [][]string {
 	target := recordedInstallTarget(agent, rec)
 	switch agent.Name {
 	case agents.NameCodex:
 		return [][]string{
-			{"plugin", "marketplace", "upgrade"},
+			{"plugin", "marketplace", "upgrade", recordedMarketplace(agent, rec)},
 			{"plugin", "add", target},
 		}
 	case agents.NameClaudeCode:
 		return [][]string{
-			marketplaceUpdateArgs(agent),
+			marketplaceUpdateArgs(agent, recordedMarketplace(agent, rec)),
 			appendScopeArg([]string{"plugin", "update", target}, rec.Scope),
 		}
 	default:
@@ -258,14 +264,15 @@ func InstallPluginForAgent(ctx context.Context, agent *agents.Agent, nativeScope
 		_, addErr := runAgentCmd(ctx, pluginCmdTimeout, prepend(bin, marketplaceAddArgs(agent.Plugin)))
 		installedMarketplace = addErr == nil && !alreadyPresent
 	}
-	if args := marketplaceUpdateArgs(agent); args != nil {
+	// A failed refresh is not fatal: the local copy of the marketplace usually
+	// still lists the plugin, so try the install and report the refresh only if
+	// that fails too. The local copy may be out of date, so warn and leave the
+	// recorded version empty below.
+	var refreshErr error
+	if args := marketplaceUpdateArgs(agent, agent.Plugin.Marketplace); args != nil {
 		if _, err := runAgentCmd(ctx, pluginCmdTimeout, prepend(bin, args)); err != nil {
-			if installedMarketplace {
-				if _, rmErr := runAgentCmd(ctx, pluginCmdTimeout, prepend(bin, marketplaceRemoveArgs(agent.Plugin))); rmErr != nil {
-					log.Warnf(ctx, "%s plugin marketplace refresh failed and the marketplace could not be de-registered: %v", agent.DisplayName, rmErr)
-				}
-			}
-			return PluginRecord{}, &BlockedError{Agent: agent.Name, Reason: ReasonInstallFailed, Detail: stderrOf(err)}
+			log.Warnf(ctx, "Could not refresh the %s marketplace, installing the %s plugin from the local copy; run `databricks aitools update` later: %s", agent.Plugin.Marketplace, agent.DisplayName, stderrOf(err))
+			refreshErr = err
 		}
 	}
 
@@ -277,14 +284,24 @@ func InstallPluginForAgent(ctx context.Context, agent *agents.Agent, nativeScope
 				log.Warnf(ctx, "%s plugin install failed and the marketplace could not be de-registered: %v", agent.DisplayName, rmErr)
 			}
 		}
-		return PluginRecord{}, &BlockedError{Agent: agent.Name, Reason: ReasonInstallFailed, Detail: stderrOf(err)}
+		blocked := &BlockedError{Agent: agent.Name, Reason: ReasonInstallFailed, Detail: stderrOf(err)}
+		if refreshErr != nil {
+			blocked.Detail += " (refreshing the marketplace also failed: " + stderrOf(refreshErr) + ")"
+		}
+		return PluginRecord{}, blocked
 	}
 
+	// After a failed refresh we can't tell which version the local copy held,
+	// so the record says "version unknown" until the next successful update.
+	version := DisplaySkillsVersion(ref)
+	if refreshErr != nil {
+		version = ""
+	}
 	return PluginRecord{
 		Marketplace:          agent.Plugin.Marketplace,
 		Plugin:               agent.Plugin.ID,
 		Scope:                nativeScope,
-		Version:              DisplaySkillsVersion(ref),
+		Version:              version,
 		InstalledMarketplace: installedMarketplace,
 	}, nil
 }

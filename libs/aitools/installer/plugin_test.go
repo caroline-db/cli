@@ -62,7 +62,7 @@ func TestInstallPluginForAgentClaudeSuccess(t *testing.T) {
 	cmds := stub.Commands()
 	assert.Contains(t, cmds, "claude plugin --help")
 	assert.Contains(t, cmds, "claude plugin marketplace add databricks/databricks-agent-skills")
-	assert.Contains(t, cmds, "claude plugin marketplace update")
+	assert.Contains(t, cmds, "claude plugin marketplace update databricks-agent-skills")
 	assert.Contains(t, cmds, "claude plugin install databricks@databricks-agent-skills --scope user")
 }
 
@@ -83,7 +83,7 @@ func TestInstallPluginForAgentSharedMarketplace(t *testing.T) {
 
 	cmds := stub.Commands()
 	assert.Contains(t, cmds, "claude plugin marketplace add anthropics/claude-plugins-official")
-	assert.Contains(t, cmds, "claude plugin marketplace update")
+	assert.Contains(t, cmds, "claude plugin marketplace update claude-plugins-official")
 	assert.Contains(t, cmds, "claude plugin install databricks@claude-plugins-official --scope user")
 }
 
@@ -163,18 +163,54 @@ func TestInstallPluginRollsBackMarketplaceOnInstallFailure(t *testing.T) {
 	assert.Contains(t, stub.Commands(), "claude plugin marketplace remove databricks-agent-skills")
 }
 
-func TestInstallPluginRollsBackMarketplaceOnRefreshFailure(t *testing.T) {
+func TestInstallPluginContinuesWhenRefreshFails(t *testing.T) {
+	// The plugin's own marketplace can't be refreshed (e.g. it is unreachable),
+	// but the local copy still lists the plugin, so the install goes on.
 	stubAgentLookPath(t, true)
 	ctx, stub := process.WithStub(t.Context())
 	stub.WithCallback(func(*exec.Cmd) error { return nil })
-	// Marketplace absent (empty list) so we add it; then the refresh fails.
 	stub.WithFailureFor("plugin marketplace update", errors.New("boom"))
+
+	rec, err := InstallPluginForAgent(ctx, claudeAgent(), "user", "v0.2.6")
+	require.NoError(t, err)
+	assert.True(t, rec.InstalledMarketplace)
+	assert.Empty(t, rec.Version, "the local copy's version is unknown after a failed refresh")
+	assert.Contains(t, stub.Commands(), "claude plugin install databricks@databricks-agent-skills --scope user")
+	assert.NotContains(t, stub.Commands(), "claude plugin marketplace remove databricks-agent-skills")
+}
+
+func TestInstallPluginContinuesWhenRefreshOfRegisteredMarketplaceFails(t *testing.T) {
+	// The marketplace was registered before, so its local copy may be old: the
+	// install goes on, but the marketplace is not ours to remove or record.
+	stubAgentLookPath(t, true)
+	ctx, stub := process.WithStub(t.Context())
+	stub.WithCallback(func(*exec.Cmd) error { return nil })
+	stub.WithStdoutFor("plugin marketplace list", "databricks-agent-skills\n")
+	stub.WithFailureFor("plugin marketplace update", errors.New("boom"))
+
+	rec, err := InstallPluginForAgent(ctx, claudeAgent(), "user", "v0.2.6")
+	require.NoError(t, err)
+	assert.False(t, rec.InstalledMarketplace)
+	assert.Empty(t, rec.Version)
+	assert.Contains(t, stub.Commands(), "claude plugin install databricks@databricks-agent-skills --scope user")
+	assert.NotContains(t, stub.Commands(), "claude plugin marketplace remove databricks-agent-skills")
+}
+
+func TestInstallPluginRollsBackMarketplaceWhenRefreshAndInstallFail(t *testing.T) {
+	stubAgentLookPath(t, true)
+	ctx, stub := process.WithStub(t.Context())
+	stub.WithCallback(func(*exec.Cmd) error { return nil })
+	// Marketplace absent (empty list) so we add it; then refresh and install fail.
+	stub.WithFailureFor("plugin marketplace update", errors.New("refresh boom"))
+	stub.WithFailureFor("plugin install", errors.New("install boom"))
 
 	_, err := InstallPluginForAgent(ctx, claudeAgent(), "user", "v0.2.6")
 	var be *BlockedError
 	require.ErrorAs(t, err, &be)
 	assert.Equal(t, ReasonInstallFailed, be.Reason)
-	// We added the marketplace, so a failed refresh must de-register it again.
+	assert.Contains(t, be.Detail, "install boom (refreshing the marketplace also failed: ")
+	assert.Contains(t, be.Detail, "refresh boom)")
+	// We added the marketplace, so a failed install must de-register it again.
 	assert.Contains(t, stub.Commands(), "claude plugin marketplace remove databricks-agent-skills")
 }
 
@@ -185,7 +221,7 @@ func TestUpdatePluginForAgentCodexTwoStep(t *testing.T) {
 
 	require.NoError(t, UpdatePluginForAgent(ctx, codexAgent(), PluginRecord{Marketplace: "databricks-agent-skills", Plugin: "databricks", Scope: "user"}))
 	cmds := stub.Commands()
-	assert.Contains(t, cmds, "codex plugin marketplace upgrade")
+	assert.Contains(t, cmds, "codex plugin marketplace upgrade databricks-agent-skills")
 	assert.Contains(t, cmds, "codex plugin add databricks@databricks-agent-skills")
 }
 
@@ -196,7 +232,19 @@ func TestUpdatePluginForAgentClaudeOneStep(t *testing.T) {
 
 	require.NoError(t, UpdatePluginForAgent(ctx, claudeAgent(), PluginRecord{Marketplace: "databricks-agent-skills", Plugin: "databricks", Scope: "user"}))
 	cmds := stub.Commands()
-	assert.Contains(t, cmds, "claude plugin marketplace update")
+	assert.Contains(t, cmds, "claude plugin marketplace update databricks-agent-skills")
+	assert.Contains(t, cmds, "claude plugin update databricks@databricks-agent-skills --scope user")
+}
+
+func TestUpdatePluginForAgentClaudeRecordWithoutMarketplace(t *testing.T) {
+	stubAgentLookPath(t, true)
+	ctx, stub := process.WithStub(t.Context())
+	stub.WithCallback(func(*exec.Cmd) error { return nil })
+
+	// A record without a marketplace falls back to the agent's current one.
+	require.NoError(t, UpdatePluginForAgent(ctx, claudeAgent(), PluginRecord{Plugin: "databricks", Scope: "user"}))
+	cmds := stub.Commands()
+	assert.Contains(t, cmds, "claude plugin marketplace update databricks-agent-skills")
 	assert.Contains(t, cmds, "claude plugin update databricks@databricks-agent-skills --scope user")
 }
 
@@ -458,7 +506,7 @@ func TestUpdateInstalledPluginsUsesRecordedClaudeScope(t *testing.T) {
 			require.Len(t, updated, 1)
 
 			cmds := stub.Commands()
-			assert.Contains(t, cmds, "claude plugin marketplace update")
+			assert.Contains(t, cmds, "claude plugin marketplace update claude-plugins-official")
 			assert.Contains(t, cmds, "claude plugin update databricks@claude-plugins-official --scope "+scope)
 		})
 	}
