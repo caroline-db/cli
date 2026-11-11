@@ -96,6 +96,15 @@ func setupPluginMock(t *testing.T) *[]pluginCall {
 	return &calls
 }
 
+// stubPluginAlreadyInstalled pins whether an agent counts as already having the
+// plugin; the real check reads the agent's manifest under the real HOME.
+func stubPluginAlreadyInstalled(t *testing.T, installed bool) {
+	t.Helper()
+	orig := pluginAlreadyInstalledFn
+	t.Cleanup(func() { pluginAlreadyInstalledFn = orig })
+	pluginAlreadyInstalledFn = func(context.Context, *agents.Agent, string) bool { return installed }
+}
+
 // stubLegacyCleanup skips the raw-skill cleanup that follows a plugin install;
 // the test agents have no config dir for it to inspect.
 func stubLegacyCleanup(t *testing.T) {
@@ -259,7 +268,7 @@ func TestExecutePlanSkipBlockedPluginExit0(t *testing.T) {
 	t.Cleanup(func() { installPluginForAgentFn = orig; recordPluginInstallsFn = origRec })
 	installPluginForAgentFn = func(_ context.Context, a *agents.Agent, _, _ string) (installer.PluginRecord, error) {
 		if a.Name == agents.NameClaudeCode {
-			return installer.PluginRecord{}, &installer.BlockedError{Agent: a.Name, Reason: installer.ReasonCLINotOnPath}
+			return installer.PluginRecord{}, &installer.BlockedError{Agent: a.Name, Reason: installer.ReasonInstallFailed}
 		}
 		return installer.PluginRecord{Version: "0.2.6"}, nil
 	}
@@ -277,7 +286,7 @@ func TestExecutePlanSkipBlockedPluginExit0(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, outcomes, 2)
 	assert.Equal(t, outcomeFailed, outcomes[0].status)
-	assert.Equal(t, protos.AitoolsErrorCategoryCLINotOnPath, outcomes[0].errorCategory)
+	assert.Equal(t, protos.AitoolsErrorCategoryPluginInstallFailed, outcomes[0].errorCategory)
 	assert.Equal(t, outcomeInstalled, outcomes[1].status)
 
 	// Explicit (--agents) blocked install is an error.
@@ -308,6 +317,48 @@ func TestExecutePlanNothingInstalledIsAnError(t *testing.T) {
 	assert.Equal(t, "Run 'claude plugin marketplace add databricks/databricks-agent-skills', then 'claude plugin marketplace update databricks-agent-skills', then 'claude plugin install databricks@databricks-agent-skills --scope user' to see the full error, or install skill files instead: databricks aitools install --agents=claude-code --scope=global --skills-only", outcomes[0].recovery)
 	assert.Contains(t, stderr.String(), "Skipped Claude Code: 'claude plugin' failed: fatal: could not read from remote repository")
 	assert.Contains(t, stderr.String(), "  Run 'claude plugin marketplace add")
+}
+
+func TestExecutePlanFallsBackToSkillsWhenCLIIsMissing(t *testing.T) {
+	// The reported case: ~/.claude exists (desktop or IDE
+	// install), `claude` is not on PATH, nothing named via --agents. This used
+	// to print "Skipped Claude Code" and leave the agent with nothing.
+	t.Setenv("DATABRICKS_SKILLS_REF", "v0.2.6")
+	t.Setenv("PATH", t.TempDir())
+	// The fallback rewrites the install state under HOME.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	stubPluginAlreadyInstalled(t, false)
+	skills := setupInstallMock(t)
+	orig := installPluginForAgentFn
+	t.Cleanup(func() { installPluginForAgentFn = orig })
+	installPluginForAgentFn = func(_ context.Context, a *agents.Agent, _, _ string) (installer.PluginRecord, error) {
+		return installer.PluginRecord{}, &installer.BlockedError{Agent: a.Name, Reason: installer.ReasonCLINotOnPath, Detail: "not found"}
+	}
+
+	claude := testPluginAgent(agents.NameClaudeCode, "Claude Code", "claude")
+	ctx, stderr := cmdio.NewTestContextWithStderr(t.Context())
+	plan := buildPlan([]*agents.Agent{claude}, installer.ScopeGlobal, false, false)
+	outcomes, err := executePlan(ctx, nil, plan, installer.InstallOptions{Scope: installer.ScopeGlobal}, false)
+
+	require.NoError(t, err)
+	require.Len(t, *skills, 1)
+	assert.Equal(t, []string{agents.NameClaudeCode}, (*skills)[0].agents)
+	// The plugin failure stays visible to telemetry next to the skills success.
+	require.Len(t, outcomes, 2)
+	assert.Equal(t, deliveryPlugin, outcomes[0].delivery)
+	assert.Equal(t, protos.AitoolsErrorCategoryCLINotOnPath, outcomes[0].errorCategory)
+	assert.Equal(t, deliverySkills, outcomes[1].delivery)
+	assert.Equal(t, outcomeInstalled, outcomes[1].status)
+	assert.Contains(t, stderr.String(), "Skipped the plugin for Claude Code: 'claude' is not on PATH. Installing skill files instead; to switch to the plugin, make 'claude plugin' work and run 'databricks aitools install --agents=claude-code --scope=global'.")
+
+	// A named agent keeps failing instead: --agents never changes delivery.
+	*skills = nil
+	planExplicit := buildPlan([]*agents.Agent{claude}, installer.ScopeGlobal, false, true)
+	_, err = executePlan(ctx, nil, planExplicit, installer.InstallOptions{Scope: installer.ScopeGlobal}, false)
+	require.Error(t, err)
+	assert.Empty(t, *skills)
 }
 
 func TestExecutePlanSkillsFailureStillInstallsPlugins(t *testing.T) {
@@ -973,6 +1024,136 @@ func TestInstallPickerAbortSuggestsFlags(t *testing.T) {
 	err := cmd.RunE(cmd, nil)
 	require.ErrorIs(t, err, huh.ErrUserAborted)
 	assert.Equal(t, "user aborted\nTo install without prompts, name the scope and agents, for example: databricks aitools install --scope=global --agents=claude-code", err.Error())
+}
+
+func TestExecutePlanKeepsAnInstalledPluginInsteadOfAddingSkills(t *testing.T) {
+	// The plugin was installed while `claude` was on PATH; this run's PATH lacks
+	// it. Raw skills next to the plugin would show every skill twice.
+	t.Setenv("DATABRICKS_SKILLS_REF", "v0.2.6")
+	t.Setenv("PATH", t.TempDir())
+	stubPluginAlreadyInstalled(t, true)
+	skills := setupInstallMock(t)
+	orig := installPluginForAgentFn
+	t.Cleanup(func() { installPluginForAgentFn = orig })
+	installPluginForAgentFn = func(_ context.Context, a *agents.Agent, _, _ string) (installer.PluginRecord, error) {
+		return installer.PluginRecord{}, &installer.BlockedError{Agent: a.Name, Reason: installer.ReasonCLINotOnPath, Detail: "not found"}
+	}
+
+	claude := testPluginAgent(agents.NameClaudeCode, "Claude Code", "claude")
+	ctx, stderr := cmdio.NewTestContextWithStderr(t.Context())
+	plan := buildPlan([]*agents.Agent{claude}, installer.ScopeGlobal, false, false)
+	outcomes, err := executePlan(ctx, nil, plan, installer.InstallOptions{Scope: installer.ScopeGlobal}, false)
+
+	require.NoError(t, err)
+	assert.Empty(t, *skills, "no raw skills next to the plugin")
+	// One outcome: the plugin is kept, not installed, and telemetry still sees
+	// why it was not refreshed.
+	require.Len(t, outcomes, 1)
+	assert.Equal(t, deliveryPlugin, outcomes[0].delivery)
+	assert.Equal(t, outcomeKept, outcomes[0].status)
+	assert.Equal(t, protos.AitoolsErrorCategoryCLINotOnPath, outcomes[0].errorCategory)
+	assert.Empty(t, deliverySteps(outcomes))
+	assert.Contains(t, stderr.String(), "Claude Code already has the databricks plugin; it was not refreshed because 'claude' is not on PATH. To refresh it, make 'claude plugin' work and run 'databricks aitools install --agents=claude-code --scope=global'.")
+}
+
+// The skills fallback is skipped only when the plugin already serves the
+// install's scope: a global install serves every project, so only a
+// machine-wide plugin covers it, and a project or local plugin counts only for
+// a project-scope install inside its own project.
+func TestPluginAlreadyInstalledRespectsTheScope(t *testing.T) {
+	project, other := t.TempDir(), t.TempDir()
+	cases := []struct {
+		name                   string
+		scope, projectPath     string
+		wantGlobal, wantInProj bool
+	}{
+		{name: "user scope", scope: "user", wantGlobal: true, wantInProj: true},
+		{name: "project scope of this project", scope: "project", projectPath: project, wantInProj: true},
+		{name: "local scope of this project", scope: "local", projectPath: project, wantInProj: true},
+		{name: "project scope of another project", scope: "project", projectPath: other},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateAgents(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			manifest, err := json.Marshal(map[string]any{"plugins": map[string]any{
+				"databricks@claude-plugins-official": []map[string]string{{"scope": tc.scope, "projectPath": tc.projectPath, "version": "0.2.9"}},
+			}})
+			require.NoError(t, err)
+			require.NoError(t, os.MkdirAll(filepath.Join(home, ".claude", "plugins"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), manifest, 0o600))
+			t.Chdir(project)
+
+			claude := agents.ByName(agents.NameClaudeCode)
+			assert.Equal(t, tc.wantGlobal, pluginAlreadyInstalled(t.Context(), claude, installer.ScopeGlobal), "global install")
+			assert.Equal(t, tc.wantInProj, pluginAlreadyInstalled(t.Context(), claude, installer.ScopeProject), "project install")
+		})
+	}
+}
+
+// Removing the plugin with Claude Code's own CLI leaves the CLI's state record
+// behind; Claude's manifest is authoritative, so the record must not keep the
+// skills fallback from running.
+func TestPluginAlreadyInstalledTrustsClaudesManifestOverTheState(t *testing.T) {
+	isolateAgents(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Chdir(t.TempDir())
+	require.NoError(t, installer.RecordPluginInstalls(t.Context(), installer.ScopeGlobal, map[string]installer.PluginRecord{
+		agents.NameClaudeCode: {Marketplace: "claude-plugins-official", Plugin: "databricks"},
+	}, "v0.2.6"))
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".claude", "plugins"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".claude", "plugins", "installed_plugins.json"), []byte(`{"plugins":{}}`), 0o600))
+
+	claude := agents.ByName(agents.NameClaudeCode)
+	assert.False(t, pluginAlreadyInstalled(t.Context(), claude, installer.ScopeGlobal))
+
+	// The fallback install drops the stale record, so list stops reporting the
+	// removed plugin and update reconciles Claude Code's skill files again.
+	t.Setenv("DATABRICKS_SKILLS_REF", "v0.2.6")
+	setupInstallMock(t)
+	orig := installPluginForAgentFn
+	t.Cleanup(func() { installPluginForAgentFn = orig })
+	installPluginForAgentFn = func(_ context.Context, a *agents.Agent, _, _ string) (installer.PluginRecord, error) {
+		return installer.PluginRecord{}, &installer.BlockedError{Agent: a.Name, Reason: installer.ReasonCLINotOnPath, Detail: "not found"}
+	}
+	ctx := cmdio.MockDiscard(t.Context())
+	plan := buildPlan([]*agents.Agent{claude}, installer.ScopeGlobal, false, false)
+	_, err := executePlan(ctx, nil, plan, installer.InstallOptions{Scope: installer.ScopeGlobal}, true)
+	require.NoError(t, err)
+
+	dir, err := installer.GlobalSkillsDir(ctx)
+	require.NoError(t, err)
+	state, err := installer.LoadState(dir)
+	require.NoError(t, err)
+	assert.NotContains(t, state.Plugins, agents.NameClaudeCode)
+	assert.Equal(t, []*agents.Agent{claude}, excludePluginAgents([]*agents.Agent{claude}, state))
+	for _, e := range buildAgentEntries(ctx, map[string]*installer.InstallState{installer.ScopeGlobal: state}) {
+		if e.Name == agents.NameClaudeCode {
+			assert.NotEqual(t, deliveryPlugin.String(), e.Installed[installer.ScopeGlobal].Delivery)
+		}
+	}
+}
+
+func TestPluginAlreadyInstalledReadsTheScopeState(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("USERPROFILE", tmp)
+	claude := testPluginAgent(agents.NameClaudeCode, "Claude Code", "claude")
+	claude.ConfigDir = func(context.Context) (string, error) { return filepath.Join(tmp, ".claude"), nil }
+	ctx := t.Context()
+	assert.False(t, pluginAlreadyInstalled(ctx, claude, installer.ScopeGlobal))
+
+	dir, err := installer.GlobalSkillsDir(ctx)
+	require.NoError(t, err)
+	require.NoError(t, installer.RecordPluginInstalls(ctx, installer.ScopeGlobal, map[string]installer.PluginRecord{
+		agents.NameClaudeCode: {Marketplace: "claude-plugins-official", Plugin: "databricks"},
+	}, "v0.2.6"))
+	require.FileExists(t, filepath.Join(dir, ".state.json"))
+	assert.True(t, pluginAlreadyInstalled(ctx, claude, installer.ScopeGlobal))
 }
 
 func TestInstallPathFailureHasRecoveryForThePathRun(t *testing.T) {

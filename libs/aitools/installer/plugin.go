@@ -463,6 +463,32 @@ func RecordPluginInstalls(ctx context.Context, cliScope string, records map[stri
 	return SaveState(dir, state)
 }
 
+// ForgetPluginInstalls removes the plugin install records of the named agents
+// from the state file for the given CLI scope, for agents that no longer have
+// the plugin. Agents without a record, or a scope without state, are left as
+// they are.
+func ForgetPluginInstalls(ctx context.Context, cliScope string, agentNames []string) error {
+	dir, err := skillsDir(ctx, cliScope)
+	if err != nil {
+		return err
+	}
+	state, err := LoadState(dir)
+	if err != nil || state == nil {
+		return err
+	}
+	changed := false
+	for _, name := range agentNames {
+		if _, ok := state.Plugins[name]; ok {
+			delete(state.Plugins, name)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return SaveState(dir, state)
+}
+
 // ManualPluginInstallCommands returns the commands, in order, that install the
 // databricks plugin through the agent's own CLI. When the headless install
 // fails, running them by hand shows the agent's full output. Returns nil for an

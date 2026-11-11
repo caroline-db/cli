@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -326,4 +327,65 @@ func pluginFailureText(ctx context.Context, it agentPlanItem, err error) (reason
 // skipRecovery returns the recovery step for an agent the plan skipped.
 func skipRecovery(it agentPlanItem) string {
 	return "Re-run with --scope=global to set up " + it.agent.DisplayName + "."
+}
+
+// fallsBackToSkills reports whether a failed plugin install should install raw
+// skill files for the agent instead. That happens only when the agent's CLI
+// cannot be run (a desktop or IDE-only install has the config dir but no CLI
+// on PATH) and the user did not name the agent: skills are what that agent can
+// use today, and a later run with the CLI on PATH switches it to the plugin.
+// A named agent keeps failing loudly, so --agents never changes delivery.
+func fallsBackToSkills(it agentPlanItem, err error) bool {
+	if it.explicit {
+		return false
+	}
+	blocked, ok := errors.AsType[*installer.BlockedError](err)
+	return ok && blocked.Reason == installer.ReasonCLINotOnPath && !blocked.TimedOut
+}
+
+// skillsFallbackText is the notice printed when an agent gets skill files
+// instead of the plugin.
+func skillsFallbackText(ctx context.Context, it agentPlanItem, err error) string {
+	reason, _ := pluginFailureText(ctx, it, err)
+	return fmt.Sprintf("Skipped the plugin for %s: %s. Installing skill files instead; to switch to the plugin, make '%s plugin' work and run '%s'.",
+		it.agent.DisplayName, reason, it.agent.Binary, installCommand(it))
+}
+
+// pluginAlreadyInstalled reports whether the agent already has the databricks
+// plugin for this install scope. When the CLI can read the agent's own plugin
+// manifest, the manifest decides, as in agents.DatabricksTooling; otherwise the
+// CLI's install state for the scope does. A global install serves every
+// project, so only a machine-wide plugin covers it; a project or local plugin
+// counts only for a project-scope install inside its own project.
+func pluginAlreadyInstalled(ctx context.Context, a *agents.Agent, scope string) bool {
+	if a.HasPluginManifest() {
+		project := ""
+		if scope == installer.ScopeProject {
+			if cwd, err := os.Getwd(); err == nil {
+				project = cwd
+			}
+		}
+		return a.DatabricksPluginActiveIn(ctx, project)
+	}
+	dir, err := installer.GlobalSkillsDir(ctx)
+	if scope == installer.ScopeProject {
+		dir, err = installer.ProjectSkillsDir(ctx)
+	}
+	if err != nil {
+		return false
+	}
+	state, err := installer.LoadState(dir)
+	if err != nil || state == nil {
+		return false
+	}
+	_, ok := state.Plugins[a.Name]
+	return ok
+}
+
+// pluginKeptText is the notice for an agent whose CLI can't run but which
+// already has the plugin, so no skill files are added next to it.
+func pluginKeptText(ctx context.Context, it agentPlanItem, err error) string {
+	reason, _ := pluginFailureText(ctx, it, err)
+	return fmt.Sprintf("%s already has the databricks plugin; it was not refreshed because %s. To refresh it, make '%s plugin' work and run '%s'.",
+		it.agent.DisplayName, reason, it.agent.Binary, installCommand(it))
 }

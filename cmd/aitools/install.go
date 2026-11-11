@@ -28,6 +28,7 @@ var (
 	recordPluginInstallsFn   = installer.RecordPluginInstalls
 	cleanupLegacyFn          = installer.RemoveLegacyRawSkills
 	callerIsAgent            = func() bool { return useragent.AgentProvider() != "" }
+	pluginAlreadyInstalledFn = pluginAlreadyInstalled
 )
 
 // errNoAgentsSelected is returned when the picker is confirmed with nothing
@@ -278,6 +279,8 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 			case runErr == nil:
 				if category, ok := nothingInstalledCategory(outcomes); ok {
 					funnel.finishWith(ctx, protos.AitoolsCommandOutcomeFailure, category)
+				} else if onlyKeptPlugins(outcomes) {
+					funnel.finishWith(ctx, protos.AitoolsCommandOutcomeNothingToDo, protos.AitoolsErrorCategoryUnspecified)
 				}
 			case topLevelFailure(runErr) == nil:
 				// Named agents failed or were skipped. A skip has no error type of
@@ -529,6 +532,9 @@ const (
 	outcomeInstalled outcomeStatus = "installed"
 	outcomeSkipped   outcomeStatus = "skipped"
 	outcomeFailed    outcomeStatus = "failed"
+	// outcomeKept is an agent whose plugin install could not run but which
+	// already has the plugin: it is set up, though nothing was installed.
+	outcomeKept outcomeStatus = "kept"
 )
 
 // agentErrors wraps the failures of explicitly named agents, which are already
@@ -588,6 +594,7 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 	}
 
 	pluginCount := 0
+	var fallbackAgents []*agents.Agent
 	if len(pluginItems) > 0 {
 		ref, err := installer.GetPluginSkillsRef(ctx)
 		if err != nil {
@@ -599,6 +606,37 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 				cmdio.LogString(ctx, fmt.Sprintf("Installing databricks plugin for %s...", it.agent.DisplayName))
 			}
 			rec, err := installPluginForAgentFn(ctx, it.agent, it.scope, ref)
+			if err != nil && fallsBackToSkills(it, err) && pluginAlreadyInstalledFn(ctx, it.agent, opts.Scope) {
+				// Raw skills next to the plugin would show every skill twice, and
+				// `aitools update` never reconciles raw files on a plugin agent.
+				if !quiet {
+					cmdio.LogString(ctx, cmdio.Yellow(ctx, pluginKeptText(ctx, it, err)))
+				}
+				outcomes = append(outcomes, agentOutcome{
+					agent:         it.agent,
+					delivery:      deliveryPlugin,
+					status:        outcomeKept,
+					errorCategory: classifyInstallError(err),
+					message:       err.Error(),
+				})
+				continue
+			}
+			if err != nil && fallsBackToSkills(it, err) {
+				if !quiet {
+					cmdio.LogString(ctx, cmdio.Yellow(ctx, skillsFallbackText(ctx, it, err)))
+				}
+				// Keep the plugin failure in the outcomes so telemetry still sees
+				// it; the skills outcome added below records the fallback.
+				outcomes = append(outcomes, agentOutcome{
+					agent:         it.agent,
+					delivery:      deliveryPlugin,
+					status:        outcomeFailed,
+					errorCategory: classifyInstallError(err),
+					message:       err.Error(),
+				})
+				fallbackAgents = append(fallbackAgents, it.agent)
+				continue
+			}
 			if err != nil {
 				reason, recovery := pluginFailureText(ctx, it, err)
 				if !quiet {
@@ -633,6 +671,30 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 		if len(records) > 0 {
 			if err := recordPluginInstallsFn(ctx, opts.Scope, records, ref); err != nil {
 				return outcomes, errors.Join(skillsErr, err)
+			}
+		}
+	}
+
+	if len(fallbackAgents) > 0 {
+		if !quiet {
+			installer.PrintInstallingFor(ctx, fallbackAgents)
+		}
+		if err := installSkillsForAgentsFn(ctx, src, fallbackAgents, opts); err != nil {
+			skillsErr = errors.Join(skillsErr, err)
+		} else {
+			for _, a := range fallbackAgents {
+				outcomes = append(outcomes, agentOutcome{agent: a, delivery: deliverySkills, status: outcomeInstalled})
+			}
+			// These agents have no plugin (pluginAlreadyInstalled said so), so a
+			// plugin record left by a removal with the agent's own CLI is stale.
+			// Drop it, or list and update would keep treating them as plugin
+			// agents and never refresh their skill files.
+			names := make([]string, len(fallbackAgents))
+			for i, a := range fallbackAgents {
+				names[i] = a.Name
+			}
+			if err := installer.ForgetPluginInstalls(ctx, opts.Scope, names); err != nil {
+				skillsErr = errors.Join(skillsErr, err)
 			}
 		}
 	}
@@ -672,7 +734,7 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 	if len(explicitErrs) > 0 {
 		return outcomes, &agentErrors{err: errors.Join(explicitErrs...)}
 	}
-	if !slices.ContainsFunc(outcomes, func(o agentOutcome) bool { return o.status == outcomeInstalled }) {
+	if !slices.ContainsFunc(outcomes, func(o agentOutcome) bool { return o.status == outcomeInstalled || o.status == outcomeKept }) {
 		return outcomes, &agentErrors{err: newNothingInstalledError(outcomes)}
 	}
 	return outcomes, nil

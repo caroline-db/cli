@@ -115,10 +115,26 @@ func (a *Agent) DatabricksPluginVersion(ctx context.Context) (string, bool) {
 	return best, true
 }
 
-// databricksPluginActiveIn reports whether the agent's own manifest has a
+// HasPluginManifest reports whether the CLI can read the agent's own plugin
+// manifest (Claude Code). For such agents the manifest is authoritative: a
+// plugin removed with the agent's own CLI leaves the CLI's state record behind.
+func (a *Agent) HasPluginManifest() bool {
+	return a.pluginInstalls != nil
+}
+
+// DatabricksPluginActiveIn reports whether the agent's own manifest has a
 // databricks plugin record that applies in cwd (see pluginInstall.appliesTo).
 // A plugin disabled in the agent's settings still counts.
-func (a *Agent) databricksPluginActiveIn(ctx context.Context, cwd string) bool {
+// With cwd "", only machine-wide records (not project or local ones) count.
+// cwd is resolved here, so a working directory reached through a symlink is
+// matched by the directory it points to.
+func (a *Agent) DatabricksPluginActiveIn(ctx context.Context, cwd string) bool {
+	if a.pluginInstalls == nil {
+		return false
+	}
+	if cwd != "" {
+		cwd = resolvePath(cwd)
+	}
 	installs, _ := a.pluginInstalls(ctx, a)
 	for _, install := range installs {
 		if install.appliesTo(cwd) {

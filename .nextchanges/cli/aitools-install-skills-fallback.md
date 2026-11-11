@@ -1,0 +1,1 @@
+* `databricks aitools install` installs skill files for a detected coding agent whose CLI cannot run (for example a Claude Code desktop or IDE install), and says how to switch to the plugin later. ([#7482](https://github.com/databricks/cli/pull/7482))

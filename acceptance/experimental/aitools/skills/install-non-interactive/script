@@ -1,0 +1,54 @@
+# Isolate HOME so parallel aitools tests don't race on a shared ~/.databricks.
+sethome home
+
+# Agent config dirs can also be moved by environment variables. Point them all
+# at the fixture HOME, so the developer's own agents are not detected and
+# nothing is written outside it.
+unset CLAUDE_CONFIG_DIR PI_CODING_AGENT_DIR GEMINI_CLI_HOME GOOSE_PATH_ROOT
+export XDG_CONFIG_HOME="${USERPROFILE:-$HOME}/.config"
+export APPDATA="${USERPROFILE:-$HOME}/AppData/Roaming"
+
+# Agents are also detected by their CLI binary on PATH, so drop every PATH entry
+# that holds one; otherwise the developer's own agents would join the run. That
+# can drop /usr/bin (and /bin on a merged-/usr system), so resolve the commands
+# the script runs first. Windows also finds a command under each PATHEXT
+# extension (e.g. claude.cmd), so check those names too.
+mkdir_bin=$(command -v mkdir)
+rm_bin=$(command -v rm)
+exts=""
+if [ -n "${PATHEXT:-}" ]; then exts=$(printf '%s' "$PATHEXT" | tr ';' ':'); fi
+filtered_path=""
+IFS=:
+for dir in $PATH; do
+  keep=1
+  for bin in claude cursor-agent codex opencode copilot pi gemini goose kiro; do
+    if [ -x "$dir/$bin" ]; then keep=; fi
+    for ext in $exts; do
+      if [ -f "$dir/$bin$ext" ]; then keep=; fi
+    done
+  done
+  if [ -n "$keep" ]; then filtered_path="$filtered_path:$dir"; fi
+done
+unset IFS
+export PATH="${filtered_path#:}"
+
+# Claude Code's config dir exists but its CLI is not on PATH (desktop or IDE
+# install). Cursor has no plugin and gets raw skill files.
+"$mkdir_bin" -p "${USERPROFILE:-$HOME}/.claude" "${USERPROFILE:-$HOME}/.cursor"
+
+title "no flags, no terminal: no prompts, global scope, every detected agent"
+# Stdin is not a TTY, so the scope select and agent picker are skipped. Cursor
+# gets skills; Claude Code's plugin cannot be installed without its CLI, so it
+# gets skill files too, with a note on how to switch to the plugin later.
+trace $CLI aitools install
+
+title "a named agent does not fall back: the failure says what to run"
+trace musterr $CLI aitools install --agents=claude-code
+
+title "the suggested recovery command works"
+trace $CLI aitools install --agents=claude-code --skills-only
+
+title "nothing can be set up: the run fails instead of exiting 0"
+# Cursor only supports global skills, so a project-scope run has nothing to do.
+"$rm_bin" -rf "${USERPROFILE:-$HOME}/.claude"
+trace musterr $CLI aitools install --scope=project

@@ -396,6 +396,61 @@ func TestInstallFunnelDetectedPluginFailureIsNotSuccess(t *testing.T) {
 	}, funnelShape(funnelEvents(ctx)))
 }
 
+// A detected agent whose CLI is missing but which already has the plugin keeps
+// it: the run exits 0, installs nothing, and the funnel says so.
+func TestInstallFunnelKeptPluginIsNothingToDo(t *testing.T) {
+	isolateAgents(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("USERPROFILE", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp+"/.config")
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, ".claude"), 0o755))
+	fakeBinsOnPath(t)
+	t.Setenv("DATABRICKS_SKILLS_REF", "v0.2.6")
+	setupPluginMock(t)
+	forbidSkillsInstall(t)
+	stubPluginAlreadyInstalled(t, true)
+	installPluginForAgentFn = func(_ context.Context, a *agents.Agent, _, _ string) (installer.PluginRecord, error) {
+		return installer.PluginRecord{}, &installer.BlockedError{Agent: a.Name, Reason: installer.ReasonCLINotOnPath, Detail: "not found"}
+	}
+
+	ctx, err := runInstall(t, cmdio.MockDiscard(t.Context()), "--scope", "global")
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"STARTED", "FLAGS_VALIDATED", "SCOPE_RESOLVED", "AGENTS_SELECTED", "PLAN_CONFIRMED",
+		"FINISHED:NOTHING_TO_DO:",
+	}, funnelShape(funnelEvents(ctx)))
+}
+
+// A kept plugin does not hide another detected agent's failed install: the
+// funnel reports the failure with that agent's category.
+func TestInstallFunnelKeptPluginWithAFailedInstallIsFailure(t *testing.T) {
+	isolateAgents(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("USERPROFILE", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp+"/.config")
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, ".claude"), 0o755))
+	fakeBinsOnPath(t, "codex")
+	t.Setenv("DATABRICKS_SKILLS_REF", "v0.2.6")
+	setupPluginMock(t)
+	forbidSkillsInstall(t)
+	stubPluginAlreadyInstalled(t, true)
+	installPluginForAgentFn = func(_ context.Context, a *agents.Agent, _, _ string) (installer.PluginRecord, error) {
+		if a.Name == agents.NameClaudeCode {
+			return installer.PluginRecord{}, &installer.BlockedError{Agent: a.Name, Reason: installer.ReasonCLINotOnPath, Detail: "not found"}
+		}
+		return installer.PluginRecord{}, &installer.BlockedError{Agent: a.Name, Reason: installer.ReasonInstallFailed}
+	}
+
+	ctx, err := runInstall(t, cmdio.MockDiscard(t.Context()), "--scope", "global")
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"STARTED", "FLAGS_VALIDATED", "SCOPE_RESOLVED", "AGENTS_SELECTED", "PLAN_CONFIRMED",
+		"FINISHED:FAILURE:PLUGIN_INSTALL_FAILED",
+	}, funnelShape(funnelEvents(ctx)))
+}
+
 func TestNothingInstalledCategory(t *testing.T) {
 	codex := &agents.Agent{Name: agents.NameCodex}
 	cursor := &agents.Agent{Name: agents.NameCursor}
@@ -410,6 +465,17 @@ func TestNothingInstalledCategory(t *testing.T) {
 	got, ok := nothingInstalledCategory([]agentOutcome{failed, skipped})
 	assert.True(t, ok)
 	assert.Equal(t, protos.AitoolsErrorCategoryPluginInstallFailed, got)
+
+	kept := agentOutcome{agent: codex, delivery: deliveryPlugin, status: outcomeKept, errorCategory: protos.AitoolsErrorCategoryCLINotOnPath}
+	_, ok = nothingInstalledCategory([]agentOutcome{kept, skipped})
+	assert.False(t, ok, "a kept plugin is not a failed run")
+	assert.True(t, onlyKeptPlugins([]agentOutcome{kept, skipped}))
+	assert.False(t, onlyKeptPlugins([]agentOutcome{kept, installed}))
+	assert.False(t, onlyKeptPlugins([]agentOutcome{failed, skipped}))
+	got, ok = nothingInstalledCategory([]agentOutcome{kept, failed})
+	assert.True(t, ok, "a kept plugin does not hide a failed install")
+	assert.Equal(t, protos.AitoolsErrorCategoryPluginInstallFailed, got)
+	assert.False(t, onlyKeptPlugins([]agentOutcome{kept, failed}))
 
 	uncategorized := agentOutcome{agent: codex, delivery: deliveryPlugin, status: outcomeFailed}
 	assert.Equal(t, protos.AitoolsErrorCategoryUnsupportedScope, firstFailureCategory([]agentOutcome{installed, uncategorized, skipped}))

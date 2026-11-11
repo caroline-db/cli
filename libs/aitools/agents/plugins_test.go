@@ -91,7 +91,25 @@ func TestDatabricksPluginActiveInChecksEveryRecord(t *testing.T) {
 			{Scope: "user"},
 		}, true
 	}}
-	assert.True(t, a.databricksPluginActiveIn(t.Context(), project))
+	assert.True(t, a.DatabricksPluginActiveIn(t.Context(), project))
+}
+
+// A working directory spelled through a symlink inside the project that points
+// out of it is the directory it points to, which the project's plugin does not
+// cover.
+func TestDatabricksPluginActiveInResolvesTheWorkingDir(t *testing.T) {
+	project, _ := projectFixture(t)
+	outside := filepath.Join(filepath.Dir(project), "Other")
+	require.NoError(t, os.Mkdir(outside, 0o755))
+	link := filepath.Join(project, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("cannot create a symlink: %v", err)
+	}
+	a := &Agent{pluginInstalls: func(context.Context, *Agent) ([]pluginInstall, bool) {
+		return []pluginInstall{{Scope: "project", ProjectPath: project}}, true
+	}}
+	assert.False(t, a.DatabricksPluginActiveIn(t.Context(), link))
+	assert.True(t, a.DatabricksPluginActiveIn(t.Context(), project))
 }
 
 func TestPluginInstallAppliesToProjectOutsideWorkingDir(t *testing.T) {

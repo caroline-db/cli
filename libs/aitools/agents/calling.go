@@ -72,7 +72,7 @@ func (a *Agent) DatabricksTooling(ctx context.Context, pluginRecorded func() boo
 	}
 	switch {
 	case a.pluginInstalls != nil:
-		if a.databricksPluginActiveIn(ctx, cwd) {
+		if a.DatabricksPluginActiveIn(ctx, cwd) {
 			return ToolingPlugin
 		}
 	case a.Plugin != nil:

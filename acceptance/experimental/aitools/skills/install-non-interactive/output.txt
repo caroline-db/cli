@@ -1,0 +1,33 @@
+
+=== no flags, no terminal: no prompts, global scope, every detected agent
+>>> [CLI] aitools install
+Installing Databricks skills for Cursor...
+Using skills version test-ref
+Fetching skills manifest...
+Installed 1 skill.
+Installing databricks plugin for Claude Code...
+Skipped the plugin for Claude Code: 'claude' is not on PATH. Installing skill files instead; to switch to the plugin, make 'claude plugin' work and run 'databricks aitools install --agents=claude-code --scope=global'.
+Installing Databricks skills for Claude Code...
+Using skills version test-ref
+Fetching skills manifest...
+Installed 1 skill.
+
+=== a named agent does not fall back: the failure says what to run
+>>> musterr [CLI] aitools install --agents=claude-code
+Installing databricks plugin for Claude Code...
+Skipped Claude Code: 'claude' is not on PATH
+  Install or update the Claude Code CLI so 'claude' is on PATH, then re-run 'databricks aitools install --agents=claude-code --scope=global'. Or install skill files instead: databricks aitools install --agents=claude-code --scope=global --skills-only
+Error: Claude Code: 'claude' is not on PATH
+
+=== the suggested recovery command works
+>>> [CLI] aitools install --agents=claude-code --skills-only
+Installing Databricks skills for Claude Code...
+Using skills version test-ref
+Fetching skills manifest...
+Installed 1 skill.
+
+=== nothing can be set up: the run fails instead of exiting 0
+>>> musterr [CLI] aitools install --scope=project
+Skipped Cursor: does not support project-scoped skills
+  Re-run with --scope=global to set up Cursor.
+Error: nothing was installed; follow the steps above for each agent

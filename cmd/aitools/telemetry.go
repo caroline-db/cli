@@ -465,17 +465,47 @@ func instrumentCommand(cmd *cobra.Command, command protos.AitoolsCommand) *cobra
 // installed nothing for any agent (e.g. the only detected agent's plugin
 // install failed, which is a warning, not an error), and if so the category of
 // the first agent that failed or was skipped. The funnel records such a run as
-// FAILURE rather than SUCCESS.
+// FAILURE rather than SUCCESS. An agent that kept its plugin is set up, so it
+// is not a failure by itself (see onlyKeptPlugins), but another agent's failed
+// install still is, and its category is the one reported.
 func nothingInstalledCategory(outcomes []agentOutcome) (protos.AitoolsErrorCategory, bool) {
 	if len(outcomes) == 0 {
 		return "", false
 	}
+	kept := false
+	var failed []agentOutcome
 	for _, o := range outcomes {
-		if o.status == outcomeInstalled {
+		switch o.status {
+		case outcomeInstalled:
 			return "", false
+		case outcomeKept:
+			kept = true
+		case outcomeFailed:
+			failed = append(failed, o)
+		case outcomeSkipped:
 		}
 	}
+	if len(failed) > 0 {
+		return firstFailureCategory(failed), true
+	}
+	if kept {
+		return "", false
+	}
 	return firstFailureCategory(outcomes), true
+}
+
+// onlyKeptPlugins reports whether a run installed nothing, failed for no agent,
+// and left at least one agent with the plugin it already had. The funnel
+// records such a run as NOTHING_TO_DO rather than SUCCESS.
+func onlyKeptPlugins(outcomes []agentOutcome) bool {
+	kept := false
+	for _, o := range outcomes {
+		if o.status == outcomeInstalled || o.status == outcomeFailed {
+			return false
+		}
+		kept = kept || o.status == outcomeKept
+	}
+	return kept
 }
 
 // firstFailureCategory returns the category of the first agent that failed or
