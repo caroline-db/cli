@@ -1481,3 +1481,29 @@ func withCachedCompat(t *testing.T, skills string) {
 	manifest := fmt.Sprintf(`{"0.0.0":{"appkit":"0.24.0","skills":%q}}`, skills)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "compat-manifest.json"), []byte(manifest), 0o644))
 }
+
+func TestGetPluginSkillsRefFallsBackWhenLookupFails(t *testing.T) {
+	// A rate-limited api.github.com used to fail every plugin install, though
+	// the plugin itself comes from the agent's marketplace.
+	setBuildVersion(t, "1.22.0")
+	t.Setenv("DATABRICKS_SKILLS_REF", "")
+	t.Setenv("DATABRICKS_FORCE_EMBEDDED_COMPAT", "false")
+	t.Setenv("DATABRICKS_CACHE_ENABLED", "true")
+	withCachedCompat(t, skillsLatestSentinel)
+	lookups := 0
+	orig := latestSkillsReleaseRefFn
+	t.Cleanup(func() { latestSkillsReleaseRefFn = orig })
+	latestSkillsReleaseRefFn = func(context.Context) (string, error) {
+		lookups++
+		return "", errors.New("HTTP 403 fetching latest skills release")
+	}
+	fallbackVersion, err := clicompat.ResolveEmbeddedAgentSkillsVersion()
+	require.NoError(t, err)
+
+	ref, err := GetPluginSkillsRef(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "v"+fallbackVersion, ref)
+	// The embedded pin is also what forced-embedded resolution returns, so the
+	// ref alone does not prove the failing lookup ran.
+	assert.Equal(t, 1, lookups)
+}

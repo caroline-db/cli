@@ -106,6 +106,16 @@ func GetSkillsRef(ctx context.Context) (ref string, explicit bool, err error) {
 	return getSkillsRef(ctx, false)
 }
 
+// GetPluginSkillsRef returns the skills ref to record for a plugin install,
+// falling back to the embedded skills version when the latest release cannot be
+// resolved. The agent's own CLI fetches the plugin from its marketplace, so the
+// ref is bookkeeping only; an unreachable or rate-limited api.github.com must
+// not block the install.
+func GetPluginSkillsRef(ctx context.Context) (string, error) {
+	ref, _, err := getSkillsRef(ctx, true)
+	return ref, err
+}
+
 func getSkillsRef(ctx context.Context, allowFallback bool) (ref string, explicit bool, err error) {
 	if ref := env.Get(ctx, "DATABRICKS_SKILLS_REF"); ref != "" {
 		return ref, true, nil
