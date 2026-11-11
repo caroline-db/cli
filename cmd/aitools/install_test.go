@@ -278,6 +278,32 @@ func TestExecutePlanSkipBlockedPluginExit0(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestExecutePlanSkillsFailureStillInstallsPlugins(t *testing.T) {
+	t.Setenv("DATABRICKS_SKILLS_REF", "v0.2.6")
+	plugins := setupPluginMock(t)
+	stubLegacyCleanup(t)
+	origSkills := installSkillsForAgentsFn
+	t.Cleanup(func() { installSkillsForAgentsFn = origSkills })
+	fetchErr := &installer.FetchError{Stage: installer.FetchStageManifest, StatusCode: 503, Err: errors.New("failed to fetch manifest: HTTP 503")}
+	installSkillsForAgentsFn = func(context.Context, installer.ManifestSource, []*agents.Agent, installer.InstallOptions) error {
+		return fetchErr
+	}
+
+	claude := testPluginAgent(agents.NameClaudeCode, "Claude Code", "claude")
+	cursor := &agents.Agent{Name: agents.NameCursor, DisplayName: "Cursor"}
+	ctx := cmdio.MockDiscard(t.Context())
+	plan := buildPlan([]*agents.Agent{cursor, claude}, installer.ScopeGlobal, false, false)
+	outcomes, err := executePlan(ctx, nil, plan, installer.InstallOptions{Scope: installer.ScopeGlobal}, false)
+
+	// The skills failure is still the command's error, but it no longer stops
+	// Claude Code's plugin install.
+	require.ErrorIs(t, err, fetchErr)
+	require.Len(t, *plugins, 1)
+	require.Len(t, outcomes, 1)
+	assert.Equal(t, agents.NameClaudeCode, outcomes[0].agent.Name)
+	assert.Equal(t, outcomeInstalled, outcomes[0].status)
+}
+
 // --- RunE: skills-only path (config-dir detection, no plugin) ---
 
 func TestInstallSkillsOnlyAllAgents(t *testing.T) {

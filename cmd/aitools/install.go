@@ -553,17 +553,18 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 	var outcomes []agentOutcome
 	var explicitErrs []error
 
+	// A skills install runs as a group; its failure is the command's top-level
+	// error. Plugin agents don't depend on it, so they are still attempted.
+	var skillsErr error
 	if len(skillsAgents) > 0 {
 		if !quiet {
 			installer.PrintInstallingFor(ctx, skillsAgents)
 		}
-		// A skills install runs as a group; on failure the whole command fails and
-		// the top-level error category classifies it.
-		if err := installSkillsForAgentsFn(ctx, src, skillsAgents, opts); err != nil {
-			return outcomes, err
-		}
-		for _, a := range skillsAgents {
-			outcomes = append(outcomes, agentOutcome{agent: a, delivery: deliverySkills, status: outcomeInstalled})
+		skillsErr = installSkillsForAgentsFn(ctx, src, skillsAgents, opts)
+		if skillsErr == nil {
+			for _, a := range skillsAgents {
+				outcomes = append(outcomes, agentOutcome{agent: a, delivery: deliverySkills, status: outcomeInstalled})
+			}
 		}
 	}
 
@@ -571,7 +572,7 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 	if len(pluginItems) > 0 {
 		ref, err := installer.GetPluginSkillsRef(ctx)
 		if err != nil {
-			return outcomes, err
+			return outcomes, errors.Join(skillsErr, err)
 		}
 		records := map[string]installer.PluginRecord{}
 		for _, it := range pluginItems {
@@ -609,7 +610,7 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 		}
 		if len(records) > 0 {
 			if err := recordPluginInstallsFn(ctx, opts.Scope, records, ref); err != nil {
-				return outcomes, err
+				return outcomes, errors.Join(skillsErr, err)
 			}
 		}
 	}
@@ -638,6 +639,11 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 		cmdio.LogString(ctx, fmt.Sprintf("Installed the plugin for %d %s.", pluginCount, noun))
 	}
 
+	// The skills error has no per-agent entry, so it stays the top-level error;
+	// explicit per-agent failures are already in their outcomes.
+	if skillsErr != nil {
+		return outcomes, skillsErr
+	}
 	if len(explicitErrs) > 0 {
 		return outcomes, &agentErrors{err: errors.Join(explicitErrs...)}
 	}
