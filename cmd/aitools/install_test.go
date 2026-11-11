@@ -347,7 +347,7 @@ func TestInstallPluginFirstDefault(t *testing.T) {
 	assert.Contains(t, stderr.String(), "Installing databricks plugin for Claude Code...")
 }
 
-func TestInstallInteractivePickerAndConfirm(t *testing.T) {
+func TestInstallInteractivePickerWithoutConfirm(t *testing.T) {
 	setupTestAgents(t)
 	fakeBinsOnPath(t, "claude")
 	t.Setenv("DATABRICKS_SKILLS_REF", "v0.2.6")
@@ -367,16 +367,6 @@ func TestInstallInteractivePickerAndConfirm(t *testing.T) {
 		return nil, nil
 	}
 
-	// The confirm is a huh widget that reads the real terminal, so drive it via
-	// the override rather than piped stdin; assert it was consulted.
-	origProceed := promptProceed
-	t.Cleanup(func() { promptProceed = origProceed })
-	proceedCalled := false
-	promptProceed = func() (bool, error) {
-		proceedCalled = true
-		return true, nil
-	}
-
 	ctx, test := cmdio.SetupTest(t.Context(), cmdio.TestOptions{PromptSupported: true})
 	defer test.Done()
 	go drainReader(test.Stdout)
@@ -386,8 +376,8 @@ func TestInstallInteractivePickerAndConfirm(t *testing.T) {
 	cmd.SetContext(telemetry.WithNewLogger(ctx))
 
 	require.NoError(t, cmd.RunE(cmd, nil))
+	// No "Proceed?" confirm follows the picker: the install runs right away.
 	assert.True(t, pickerCalled)
-	assert.True(t, proceedCalled)
 	require.Len(t, *plugins, 1)
 	assert.Equal(t, agents.NameClaudeCode, (*plugins)[0].agent)
 }

@@ -236,27 +236,26 @@ func TestInstallFunnelSkillsFailureThroughJSON(t *testing.T) {
 }
 
 func TestInstallFunnelInteractiveCancel(t *testing.T) {
+	// The agent picker is the last prompt before the install (there is no
+	// "Proceed?" confirm), so it is where an interactive user cancels.
 	cases := []struct {
-		name    string
-		proceed func() (bool, error)
-		wantErr bool
-		want    string
+		name string
+		err  error
+		want string
 	}{
-		{name: "declined", proceed: func() (bool, error) { return false, nil }, want: "FINISHED:CANCELLED:"},
-		{name: "aborted", proceed: func() (bool, error) { return false, huh.ErrUserAborted }, wantErr: true, want: "FINISHED:CANCELLED:USER_ABORTED"},
-		{name: "prompt failed", proceed: func() (bool, error) { return false, assert.AnError }, wantErr: true, want: "FINISHED:FAILURE:PROMPT_FAILED"},
+		{name: "aborted", err: huh.ErrUserAborted, want: "FINISHED:CANCELLED:USER_ABORTED"},
+		{name: "prompt failed", err: assert.AnError, want: "FINISHED:FAILURE:PROMPT_FAILED"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateAgents(t)
 			setupTestAgents(t)
 			setupScopeMock(t, installer.ScopeGlobal)
-			origPicker, origProceed := promptAgentSelection, promptProceed
-			t.Cleanup(func() { promptAgentSelection, promptProceed = origPicker, origProceed })
-			promptAgentSelection = func(_ context.Context, choices []agentChoice) ([]*agents.Agent, error) {
-				return []*agents.Agent{choices[0].agent}, nil
+			origPicker := promptAgentSelection
+			t.Cleanup(func() { promptAgentSelection = origPicker })
+			promptAgentSelection = func(context.Context, []agentChoice) ([]*agents.Agent, error) {
+				return nil, tc.err
 			}
-			promptProceed = tc.proceed
 
 			ioCtx, test := cmdio.SetupTest(t.Context(), cmdio.TestOptions{PromptSupported: true})
 			defer test.Done()
@@ -266,15 +265,10 @@ func TestInstallFunnelInteractiveCancel(t *testing.T) {
 			ctx := telemetry.WithNewLogger(ioCtx)
 			cmd := newTestInstallCmd()
 			cmd.SetContext(ctx)
-			err := cmd.RunE(cmd, nil)
-			if tc.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
+			require.Error(t, cmd.RunE(cmd, nil))
 
 			events := funnelEvents(ctx)
-			assert.Equal(t, []string{"STARTED", "FLAGS_VALIDATED", "SCOPE_RESOLVED", "AGENTS_SELECTED", tc.want}, funnelShape(events))
+			assert.Equal(t, []string{"STARTED", "FLAGS_VALIDATED", "SCOPE_RESOLVED", tc.want}, funnelShape(events))
 			assert.True(t, events[0].Interactive)
 		})
 	}

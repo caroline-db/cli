@@ -22,7 +22,6 @@ import (
 // install_test.go.
 var (
 	promptAgentSelection     = defaultPromptAgentSelection
-	promptProceed            = defaultPromptProceed
 	installSkillsForAgentsFn = installer.InstallSkillsForAgents
 	installPluginForAgentFn  = installer.InstallPluginForAgent
 	recordPluginInstallsFn   = installer.RecordPluginInstalls
@@ -237,18 +236,11 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 
 			plan := buildPlan(targetAgents, scope, skillsOnly, explicit)
 
-			// In the interactive picker path, show a plan summary and confirm.
+			// The picker selection is the user's confirmation. A separate
+			// "Proceed?" would only repeat it: agents that would be skipped are
+			// not offered in the picker, so the plan holds no surprises.
 			if !explicit && interactive {
 				printPlanSummary(ctx, plan, scope)
-				proceed, err := promptProceed()
-				if err != nil {
-					return promptError(err)
-				}
-				if !proceed {
-					cmdio.LogString(ctx, "Cancelled.")
-					funnel.finishWith(ctx, protos.AitoolsCommandOutcomeCancelled, protos.AitoolsErrorCategoryUnspecified)
-					return nil
-				}
 			}
 			funnel.step(ctx, protos.AitoolsCommandStepPlanConfirmed)
 
@@ -413,18 +405,6 @@ func agentStateLabel(s agents.DisplayState) string {
 	}
 }
 
-func defaultPromptProceed() (bool, error) {
-	proceed := true
-	err := huh.NewConfirm().
-		Title("Proceed?").
-		Value(&proceed).
-		Run()
-	if err != nil {
-		return false, err
-	}
-	return proceed, nil
-}
-
 func defaultPromptAgentSelection(_ context.Context, choices []agentChoice) ([]*agents.Agent, error) {
 	options := make([]huh.Option[string], 0, len(choices))
 	byName := make(map[string]*agents.Agent, len(choices))
@@ -496,7 +476,7 @@ func planItemFor(a *agents.Agent, scope string, skillsOnly, explicit bool) agent
 	return item
 }
 
-// printPlanSummary renders the interactive plan summary before the confirm.
+// printPlanSummary renders the interactive plan summary after the agent picker.
 func printPlanSummary(ctx context.Context, plan []agentPlanItem, scope string) {
 	cmdio.LogString(ctx, "")
 	cmdio.LogString(ctx, "Plan ("+scope+" scope):")
