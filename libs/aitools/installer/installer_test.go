@@ -1101,6 +1101,38 @@ func TestLegacyFullInstallAllowed(t *testing.T) {
 	assert.Len(t, state.Skills, 2)
 }
 
+// The recovery step for a corrupt state file is to move it aside and install
+// all skills: with skills on disk and no state, a targeted install is refused.
+func TestCorruptStateRecoveryNeedsFullInstall(t *testing.T) {
+	tmp := setupTestHome(t)
+	ctx := cmdio.MockDiscard(t.Context())
+	setupFetchMock(t)
+	t.Setenv("DATABRICKS_SKILLS_REF", testSkillsRef)
+
+	globalDir := filepath.Join(tmp, ".databricks", "aitools", "skills")
+	require.NoError(t, os.MkdirAll(filepath.Join(globalDir, "databricks-sql"), 0o755))
+	statePath := filepath.Join(globalDir, ".state.json")
+	require.NoError(t, os.WriteFile(statePath, []byte("{not json"), 0o644))
+
+	src := &mockManifestSource{manifest: testManifest()}
+	agent := testAgent(tmp)
+	targeted := InstallOptions{SpecificSkills: []string{"databricks-sql"}}
+
+	err := InstallSkillsForAgents(ctx, src, []*agents.Agent{agent}, targeted)
+	_, ok := errors.AsType[*StateError](err)
+	require.True(t, ok, "want *StateError, got %v", err)
+
+	require.NoError(t, os.Rename(statePath, statePath+".bak"))
+	err = InstallSkillsForAgents(ctx, src, []*agents.Agent{agent}, targeted)
+	require.ErrorContains(t, err, "legacy install detected")
+
+	require.NoError(t, InstallSkillsForAgents(ctx, src, []*agents.Agent{agent}, InstallOptions{}))
+	state, err := LoadState(globalDir)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Len(t, state.Skills, 2)
+}
+
 func TestInstallAllSkillsSignaturePreserved(t *testing.T) {
 	// Compile-time check that InstallAllSkills satisfies func(context.Context) error.
 	callback := func(fn func(context.Context) error) { _ = fn }

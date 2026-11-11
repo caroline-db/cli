@@ -73,6 +73,7 @@ func (d delivery) String() string {
 type agentPlanItem struct {
 	agent             *agents.Agent
 	delivery          delivery
+	cliScope          string                      // installer.ScopeGlobal or installer.ScopeProject
 	scope             string                      // agent-native plugin scope (deliveryPlugin only)
 	reason            string                      // why the agent is skipped (deliverySkip only)
 	skipErrorCategory protos.AitoolsErrorCategory // error category for the skip (deliverySkip only)
@@ -160,9 +161,10 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 			// --path is a dumb dump: no agents, no scope, no state.
 			if pathFlag != "" {
 				funnel.step(ctx, protos.AitoolsCommandStepFlagsValidated)
+				ctx = withRerunInvocation(ctx, installInvocation{path: pathFlag, skills: skillsFlag, experimental: includeExperimental})
 				written, err := installer.DumpSkillsToPath(ctx, src, pathFlag, opts)
 				if err != nil {
-					return err
+					return withRecovery(ctx, err)
 				}
 				if written == 0 {
 					// Every skill was filtered out (e.g. all experimental without
@@ -206,11 +208,15 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 			interactive := installPromptsSupported(ctx)
 			scope, err := resolveScopeWithPrompt(ctx, projectFlag, globalFlag, interactive)
 			if err != nil {
-				return promptError(err)
+				return withRecovery(ctx, promptError(err))
 			}
 			opts.Scope = scope
 			funnel.setScope(scope)
 			funnel.step(ctx, protos.AitoolsCommandStepScopeResolved)
+			// Recovery steps repeat this run with the choices already made, so a
+			// copied command never widens to every agent or the global scope.
+			rerun := installInvocation{scope: scope, skills: skillsFlag, skillsOnly: skillsOnly, experimental: includeExperimental}
+			ctx = withRerunInvocation(ctx, rerun)
 
 			// Resolve the agents to act on.
 			var targetAgents []*agents.Agent
@@ -223,13 +229,23 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 			} else {
 				targetAgents, err = selectAgents(ctx, scope, skillsOnly, interactive)
 				if err != nil {
-					return promptError(err)
+					return withRecovery(ctx, promptError(err))
 				}
 				if len(targetAgents) == 0 {
 					printNoAgentsMessage(ctx)
 					funnel.finishWith(ctx, protos.AitoolsCommandOutcomeNothingToDo, protos.AitoolsErrorCategoryUnspecified)
 					return nil
 				}
+			}
+			// Name the agents the user chose, by flag or in the picker. Without
+			// a choice the re-run detects the same agents again.
+			if explicit || interactive {
+				names := make([]string, len(targetAgents))
+				for i, a := range targetAgents {
+					names[i] = a.Name
+				}
+				rerun.agents = strings.Join(names, ",")
+				ctx = withRerunInvocation(ctx, rerun)
 			}
 			funnel.setAgents(targetAgents)
 			funnel.step(ctx, protos.AitoolsCommandStepAgentsSelected)
@@ -273,7 +289,7 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 			}
 
 			if jsonMode {
-				if jerr := renderJSON(cmd.OutOrStdout(), buildInstallOutput(opts.Scope, outcomes, runErr)); jerr != nil {
+				if jerr := renderJSON(cmd.OutOrStdout(), buildInstallOutput(ctx, opts.Scope, outcomes, runErr)); jerr != nil {
 					// Rendering failed, so the JSON the caller parses is broken.
 					// Report the render error unless the run already failed for
 					// another reason.
@@ -292,7 +308,7 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 				}
 				return nil
 			}
-			return runErr
+			return withRecovery(ctx, runErr)
 		},
 	}
 
@@ -449,7 +465,7 @@ func buildPlan(targetAgents []*agents.Agent, scope string, skillsOnly, explicit 
 // install scope. It is shared by buildPlan and the interactive picker so the
 // picker and the plan agree on what an agent will (or won't) do.
 func planItemFor(a *agents.Agent, scope string, skillsOnly, explicit bool) agentPlanItem {
-	item := agentPlanItem{agent: a, explicit: explicit}
+	item := agentPlanItem{agent: a, cliScope: scope, explicit: explicit}
 	switch {
 	case skillsOnly || a.Plugin == nil:
 		// Raw-skills delivery (no-plugin agents, or --skills-only). Only some agents
@@ -503,6 +519,7 @@ type agentOutcome struct {
 	status        outcomeStatus
 	errorCategory protos.AitoolsErrorCategory // Unspecified when status == outcomeInstalled
 	message       string                      // set when skipped or failed
+	recovery      string                      // next step for the user, when skipped or failed
 }
 
 type outcomeStatus string
@@ -581,8 +598,10 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 			}
 			rec, err := installPluginForAgentFn(ctx, it.agent, it.scope, ref)
 			if err != nil {
+				reason, recovery := pluginFailureText(ctx, it, err)
 				if !quiet {
-					cmdio.LogString(ctx, cmdio.Yellow(ctx, fmt.Sprintf("Skipped %s: %v", it.agent.DisplayName, err)))
+					cmdio.LogString(ctx, cmdio.Yellow(ctx, fmt.Sprintf("Skipped %s: %s", it.agent.DisplayName, reason)))
+					cmdio.LogString(ctx, "  "+recovery)
 				}
 				outcomes = append(outcomes, agentOutcome{
 					agent:         it.agent,
@@ -590,9 +609,10 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 					status:        outcomeFailed,
 					errorCategory: classifyInstallError(err),
 					message:       err.Error(),
+					recovery:      recovery,
 				})
 				if it.explicit {
-					explicitErrs = append(explicitErrs, err)
+					explicitErrs = append(explicitErrs, &displayError{msg: it.agent.DisplayName + ": " + reason, err: err})
 				}
 				continue
 			}
@@ -616,8 +636,10 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 	}
 
 	for _, it := range skipItems {
+		recovery := skipRecovery(it)
 		if !quiet {
 			cmdio.LogString(ctx, cmdio.Yellow(ctx, "Skipped "+it.agent.DisplayName+": "+it.reason))
+			cmdio.LogString(ctx, "  "+recovery)
 		}
 		outcomes = append(outcomes, agentOutcome{
 			agent:         it.agent,
@@ -625,6 +647,7 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 			status:        outcomeSkipped,
 			errorCategory: it.skipErrorCategory,
 			message:       it.reason,
+			recovery:      recovery,
 		})
 		if it.explicit {
 			explicitErrs = append(explicitErrs, fmt.Errorf("%s: %s", it.agent.DisplayName, it.reason))
@@ -660,6 +683,8 @@ type installOutput struct {
 	// also records.
 	Error         string `json:"error,omitempty"`
 	ErrorCategory string `json:"error_category,omitempty"`
+	// Recovery is the next step for the top-level failure, local-only like Error.
+	Recovery string `json:"recovery,omitempty"`
 }
 
 type agentResultJSON struct {
@@ -668,9 +693,10 @@ type agentResultJSON struct {
 	Status        string `json:"status"`
 	ErrorCategory string `json:"error_category,omitempty"`
 	Message       string `json:"message,omitempty"`
+	Recovery      string `json:"recovery,omitempty"`
 }
 
-func buildInstallOutput(scope string, outcomes []agentOutcome, runErr error) installOutput {
+func buildInstallOutput(ctx context.Context, scope string, outcomes []agentOutcome, runErr error) installOutput {
 	out := installOutput{Scope: scope, Agents: make([]agentResultJSON, 0, len(outcomes))}
 	for _, o := range outcomes {
 		entry := agentResultJSON{
@@ -678,6 +704,7 @@ func buildInstallOutput(scope string, outcomes []agentOutcome, runErr error) ins
 			Delivery: o.delivery.String(),
 			Status:   string(o.status),
 			Message:  o.message,
+			Recovery: o.recovery,
 		}
 		// Only non-successful outcomes carry a category, keyed on status to match
 		// agentResultsField in telemetry.go so the JSON and telemetry views of the
@@ -694,6 +721,7 @@ func buildInstallOutput(scope string, outcomes []agentOutcome, runErr error) ins
 	if e := topLevelFailure(runErr); e != nil {
 		out.Error = e.Error()
 		out.ErrorCategory = string(classifyInstallError(e))
+		out.Recovery = installRecovery(ctx, e)
 	}
 	return out
 }
@@ -734,5 +762,5 @@ func printNoAgentsMessage(ctx context.Context) {
 	cmdio.LogString(ctx, cmdio.Yellow(ctx, "No supported coding agents found on PATH."))
 	cmdio.LogString(ctx, "")
 	cmdio.LogString(ctx, "Supported: "+strings.Join(agents.SupportedNames(), ", ")+".")
-	cmdio.LogString(ctx, "Install one, then re-run 'databricks aitools install'.")
+	cmdio.LogString(ctx, "Install one, then re-run 'databricks aitools install'. To set up an agent that was not detected, name it: databricks aitools install --agents=<name>")
 }

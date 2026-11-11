@@ -6,11 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
+	"github.com/charmbracelet/huh"
 	"github.com/databricks/cli/cmd/root"
 	"github.com/databricks/cli/libs/aitools/agents"
 	"github.com/databricks/cli/libs/aitools/installer"
@@ -920,4 +922,79 @@ func TestInstallAgentCallerInPTYNeverPrompts(t *testing.T) {
 	assert.Equal(t, agents.NameClaudeCode, (*plugins)[0].agent)
 	require.Len(t, *skills, 1)
 	assert.Equal(t, installer.ScopeGlobal, (*skills)[0].opts.Scope)
+}
+
+func TestInstallPickerAbortSuggestsFlags(t *testing.T) {
+	setupTestAgents(t)
+	setupScopeMock(t, installer.ScopeGlobal)
+	origPrompt := promptAgentSelection
+	t.Cleanup(func() { promptAgentSelection = origPrompt })
+	promptAgentSelection = func(context.Context, []agentChoice) ([]*agents.Agent, error) {
+		return nil, huh.ErrUserAborted
+	}
+
+	ctx, test := cmdio.SetupTest(t.Context(), cmdio.TestOptions{PromptSupported: true})
+	defer test.Done()
+	go drainReader(test.Stdout)
+	go drainReader(test.Stderr)
+	cmd := newTestInstallCmd()
+	cmd.SetContext(ctx)
+
+	err := cmd.RunE(cmd, nil)
+	require.ErrorIs(t, err, huh.ErrUserAborted)
+	assert.Equal(t, "user aborted\nTo install without prompts, name the scope and agents, for example: databricks aitools install --scope=global --agents=claude-code", err.Error())
+}
+
+func TestInstallPathFailureHasRecoveryForThePathRun(t *testing.T) {
+	setupTestAgents(t)
+	t.Setenv("DATABRICKS_SKILLS_REF", "v0.2.6")
+	t.Setenv("DATABRICKS_SKILLS_BASE_URL", "http://127.0.0.1:1")
+	// A relative destination keeps the printed command independent of how the
+	// host spells its temp dir; the space makes it need quoting in every shell.
+	t.Chdir(t.TempDir())
+	const out = "my skills"
+
+	ctx := telemetry.WithNewLogger(cmdio.MockDiscard(t.Context()))
+	cmd := newTestInstallCmd()
+	cmd.SetContext(ctx)
+	cmd.SetArgs([]string{"--path", out})
+	err := cmd.Execute()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "\nCould not reach 127.0.0.1:1 to download Databricks skills.")
+	want := "databricks aitools install --path='my skills'"
+	if runtime.GOOS == "windows" {
+		want = `databricks aitools install --path="my skills"`
+	}
+	assert.Contains(t, err.Error(), "then re-run '"+want+"'")
+}
+
+func TestInstallFailureAfterPickerNamesTheSelectedAgents(t *testing.T) {
+	isolateAgents(t)
+	setupTestAgents(t)
+	setupScopeMock(t, installer.ScopeGlobal)
+	t.Setenv("DATABRICKS_SKILLS_BASE_URL", "")
+	origPicker := promptAgentSelection
+	t.Cleanup(func() { promptAgentSelection = origPicker })
+	// Claude Code and Cursor are detected; the user picks only Cursor.
+	promptAgentSelection = func(context.Context, []agentChoice) ([]*agents.Agent, error) {
+		return []*agents.Agent{agents.ByName(agents.NameCursor)}, nil
+	}
+	origInstall := installSkillsForAgentsFn
+	t.Cleanup(func() { installSkillsForAgentsFn = origInstall })
+	installSkillsForAgentsFn = func(context.Context, installer.ManifestSource, []*agents.Agent, installer.InstallOptions) error {
+		return &installer.FetchError{Stage: installer.FetchStageManifest, StatusCode: http.StatusBadGateway, Err: errors.New("failed to fetch manifest: HTTP 502")}
+	}
+
+	ioCtx, test := cmdio.SetupTest(t.Context(), cmdio.TestOptions{PromptSupported: true})
+	defer test.Done()
+	go drainReader(test.Stdout)
+	go drainReader(test.Stderr)
+	cmd := newTestInstallCmd()
+	cmd.SetContext(telemetry.WithNewLogger(ioCtx))
+	require.NoError(t, cmd.Flags().Set("skills-only", "true"))
+
+	err := cmd.RunE(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "re-run 'databricks aitools install --scope=global --agents=cursor --skills-only'")
 }

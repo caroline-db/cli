@@ -9,14 +9,16 @@
       "delivery": "skip",
       "status": "skipped",
       "error_category": "UNSUPPORTED_SCOPE",
-      "message": "does not support project-scoped skills"
+      "message": "does not support project-scoped skills",
+      "recovery": "Re-run with --scope=global to set up Cursor."
     },
     {
       "name": "codex",
       "delivery": "skip",
       "status": "skipped",
       "error_category": "UNSUPPORTED_SCOPE",
-      "message": "does not support project-scoped skills"
+      "message": "does not support project-scoped skills",
+      "recovery": "Re-run with --scope=global to set up Codex CLI."
     }
   ]
 }
