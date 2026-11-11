@@ -3,9 +3,12 @@
 package version
 
 import (
+	"context"
+
 	"github.com/databricks/cli/cmd/root"
 	"github.com/databricks/cli/internal/build"
 	"github.com/databricks/cli/libs/cmdio"
+	"github.com/databricks/cli/libs/flags"
 	"github.com/databricks/cli/libs/versioncheck"
 	"github.com/spf13/cobra"
 )
@@ -30,6 +33,23 @@ Download the latest release: https://github.com/databricks/cli/releases
 {{- end}}
 `
 
+// aitoolsHint follows the text-mode update check on stderr, so stdout keeps
+// only the update-check result.
+const aitoolsHint = "Set up Databricks AI tools for your coding agents: databricks aitools install"
+
+// renderUpdateCheck renders result and, in text mode, prints aitoolsHint to
+// stderr unless this is a development build.
+func renderUpdateCheck(ctx context.Context, result *versioncheck.Result, output flags.Output) error {
+	err := cmdio.RenderWithTemplate(ctx, result, "", updateCheckTemplate)
+	if err != nil {
+		return err
+	}
+	if output == flags.OutputText && !result.DevelopmentBuild {
+		cmdio.LogString(ctx, aitoolsHint)
+	}
+	return nil
+}
+
 func New() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "version",
@@ -46,7 +66,7 @@ func New() *cobra.Command {
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 		if check {
-			return cmdio.RenderWithTemplate(ctx, versioncheck.Check(ctx), "", updateCheckTemplate)
+			return renderUpdateCheck(ctx, versioncheck.Check(ctx), root.OutputType(cmd))
 		}
 		return cmdio.Render(ctx, build.GetInfo())
 	}
