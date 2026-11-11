@@ -1,15 +1,22 @@
 package telemetry
 
 import (
+	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/databricks/cli/libs/cmdctx"
+	"github.com/databricks/cli/libs/env"
 	"github.com/databricks/cli/libs/telemetry/protos"
 	"github.com/databricks/cli/libs/testserver"
 	"github.com/databricks/databricks-sdk-go/apierr"
 	"github.com/databricks/databricks-sdk-go/config"
+	"github.com/databricks/databricks-sdk-go/config/experimental/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 )
 
 func TestTelemetryUploadRetriesOnPartialSuccess(t *testing.T) {
@@ -153,6 +160,123 @@ func TestTelemetryUploadMaxRetries(t *testing.T) {
 	assert.Equal(t, 3, count)
 }
 
+// The SDK fetches tokens with context.Background(), so a token source that
+// retries ignores the deadline Upload passes to the request. The upload
+// timeout must still bound Upload.
+func TestTelemetryUploadTimeoutBoundsTokenAcquisition(t *testing.T) {
+	server := testserver.New(t)
+	t.Cleanup(server.Close)
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	ts := auth.TokenSourceFn(func(context.Context) (*oauth2.Token, error) {
+		<-release
+		return nil, errors.New("token endpoint unavailable")
+	})
+
+	ctx := WithNewLogger(t.Context())
+	ctx = env.Set(ctx, timeoutEnvVar, "0.1")
+	Log(ctx, protos.DatabricksCliLog{
+		CliTestEvent: &protos.CliTestEvent{
+			Name: protos.DummyCliEnumValue1,
+		},
+	})
+	ctx = cmdctx.SetConfigUsed(ctx, &config.Config{
+		Host:        server.URL,
+		Credentials: config.NewTokenSourceStrategy("blocking", ts),
+	})
+
+	assertUploadTimesOut(t, ctx)
+}
+
+// A token that expires between attempts is fetched again on the retry; that
+// fetch must be bounded by the upload timeout too.
+func TestTelemetryUploadTimeoutBoundsTokenRefreshOnRetry(t *testing.T) {
+	server := testserver.New(t)
+	t.Cleanup(server.Close)
+
+	expiry := time.Now().Add(500 * time.Millisecond)
+	var count atomic.Int32
+	server.Handle("POST", "/telemetry-ext", func(req testserver.Request) any {
+		count.Add(1)
+		// Fail the first attempt once the token has expired, so the retry
+		// has to fetch a new one.
+		time.Sleep(time.Until(expiry) + 50*time.Millisecond)
+		return testserver.Response{
+			StatusCode: 500,
+			Body:       apierr.APIError{StatusCode: 500, Message: "Some error"},
+		}
+	})
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var calls atomic.Int32
+	ts := auth.TokenSourceFn(func(context.Context) (*oauth2.Token, error) {
+		if calls.Add(1) == 1 {
+			return &oauth2.Token{AccessToken: "token", Expiry: expiry}, nil
+		}
+		<-release
+		return nil, errors.New("token endpoint unavailable")
+	})
+
+	ctx := WithNewLogger(t.Context())
+	ctx = env.Set(ctx, timeoutEnvVar, "2")
+	Log(ctx, protos.DatabricksCliLog{
+		CliTestEvent: &protos.CliTestEvent{
+			Name: protos.DummyCliEnumValue1,
+		},
+	})
+	ctx = cmdctx.SetConfigUsed(ctx, &config.Config{
+		Host:        server.URL,
+		Credentials: config.NewTokenSourceStrategy("expiring", ts),
+	})
+
+	assertUploadTimesOut(t, ctx)
+	assert.Equal(t, int32(1), count.Load())
+}
+
+// A config that the command never resolved is resolved when Upload creates
+// its client, which includes host metadata discovery with
+// context.Background(). The upload timeout must bound that too.
+func TestTelemetryUploadTimeoutBoundsConfigResolution(t *testing.T) {
+	server := testserver.New(t)
+	t.Cleanup(server.Close)
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	ctx := WithNewLogger(t.Context())
+	ctx = env.Set(ctx, timeoutEnvVar, "0.1")
+	Log(ctx, protos.DatabricksCliLog{
+		CliTestEvent: &protos.CliTestEvent{
+			Name: protos.DummyCliEnumValue1,
+		},
+	})
+	ctx = cmdctx.SetConfigUsed(ctx, &config.Config{
+		Host:  server.URL,
+		Token: "token",
+		HostMetadataResolver: func(context.Context, string) (*config.HostMetadata, error) {
+			<-release
+			return nil, errors.New("host unreachable")
+		},
+	})
+
+	assertUploadTimesOut(t, ctx)
+}
+
+// assertUploadTimesOut runs Upload and asserts it fails with its timeout,
+// failing the test instead of hanging if Upload does not return.
+func assertUploadTimesOut(t *testing.T, ctx context.Context) {
+	errc := make(chan error, 1)
+	go func() { errc <- Upload(ctx, protos.ExecutionContext{}) }()
+	select {
+	case err := <-errc:
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(10 * time.Second):
+		t.Fatal("Upload did not return after its timeout")
+	}
+}
+
 func TestLogWithoutLoggerDropsEvent(t *testing.T) {
 	// A context without a telemetry logger must not panic; the event is dropped.
 	assert.NotPanics(t, func() {
@@ -175,4 +299,15 @@ func TestStateLineageHash(t *testing.T) {
 func TestStateLineageHashWithoutLogger(t *testing.T) {
 	SetStateLineageHash(t.Context(), "G0ZNUjK18Pa")
 	assert.Empty(t, StateLineageHash(t.Context()))
+}
+
+func TestBufferedEvents(t *testing.T) {
+	assert.Nil(t, BufferedEvents(t.Context()))
+
+	ctx := WithNewLogger(t.Context())
+	assert.Empty(t, BufferedEvents(ctx))
+	Log(ctx, protos.DatabricksCliLog{AitoolsHintEvent: &protos.AitoolsHintEvent{HintKind: protos.AitoolsHintKindInstallText}})
+	got := BufferedEvents(ctx)
+	require.Len(t, got, 1)
+	assert.Equal(t, protos.AitoolsHintKindInstallText, got[0].AitoolsHintEvent.HintKind)
 }

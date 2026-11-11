@@ -17,6 +17,8 @@ import (
 	"github.com/databricks/cli/libs/telemetry/protos"
 	"github.com/databricks/databricks-sdk-go/apierr"
 	"github.com/databricks/databricks-sdk-go/client"
+	"github.com/databricks/databricks-sdk-go/config"
+	"github.com/databricks/databricks-sdk-go/httpclient"
 )
 
 const (
@@ -108,11 +110,6 @@ func Upload(ctx context.Context, ec protos.ExecutionContext) error {
 		return nil
 	}
 
-	apiClient, err := client.New(cmdctx.ConfigUsed(ctx))
-	if err != nil {
-		return fmt.Errorf("failed to create API client: %w", err)
-	}
-
 	uploadTimeout := defaultUploadTimeout
 	if v := env.Get(ctx, timeoutEnvVar); v != "" {
 		timeout, err := strconv.ParseFloat(v, 64)
@@ -130,6 +127,11 @@ func Upload(ctx context.Context, ec protos.ExecutionContext) error {
 	if !ok {
 		log.Infof(ctx, "context has no deadline. This is unexpected. Not uploading telemetry logs")
 		return nil
+	}
+
+	apiClient, err := newAPIClientWithin(ctx, cmdctx.ConfigUsed(ctx))
+	if err != nil {
+		return err
 	}
 
 	// Only try uploading logs for a maximum of 3 times.
@@ -197,6 +199,70 @@ func Upload(ctx context.Context, ec protos.ExecutionContext) error {
 	return errors.New("failed to upload telemetry logs after three attempts")
 }
 
+// The SDK resolves the config (including host metadata discovery) and fetches
+// auth tokens with context.Background(), so the upload deadline does not
+// bound them on its own. Upload bounds everything before a request is sent:
+// newAPIClientWithin bounds the client construction, which resolves the
+// config, and authenticate bounds the authentication of every request. The
+// requests themselves honor ctx and run on the caller's goroutine.
+//
+// On timeout the bounding goroutine is abandoned. Callers run Upload just
+// before the process exits or execs, so it does not outlive them.
+
+// newAPIClientWithin runs newAPIClient, giving up when ctx is done.
+func newAPIClientWithin(ctx context.Context, cfg *config.Config) (*client.DatabricksClient, error) {
+	type result struct {
+		client *client.DatabricksClient
+		err    error
+	}
+	resc := make(chan result, 1)
+	go func() {
+		c, err := newAPIClient(cfg)
+		resc <- result{c, err}
+	}()
+	select {
+	case res := <-resc:
+		if res.err != nil {
+			return nil, fmt.Errorf("failed to create API client: %w", res.err)
+		}
+		return res.client, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("creating telemetry API client timed out: %w", ctx.Err())
+	}
+}
+
+// newAPIClient is client.New with authenticate as the auth visitor. The SDK
+// runs the auth visitor on every request, including its own retries.
+func newAPIClient(cfg *config.Config) (*client.DatabricksClient, error) {
+	clientCfg, err := config.HTTPClientConfigFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	clientCfg.AuthVisitor = func(r *http.Request) error {
+		return authenticate(r, cfg)
+	}
+	return client.NewWithClient(cfg, httpclient.NewApiClient(clientCfg))
+}
+
+// authenticate sets the auth headers on r, giving up when r's context, which
+// carries the upload deadline, is done. It authenticates a clone so that an
+// abandoned goroutine never writes to r.
+func authenticate(r *http.Request, cfg *config.Config) error {
+	authReq := r.Clone(r.Context())
+	errc := make(chan error, 1)
+	go func() { errc <- cfg.Authenticate(authReq) }()
+	select {
+	case err := <-errc:
+		if err != nil {
+			return err
+		}
+		r.Header = authReq.Header
+		return nil
+	case <-r.Context().Done():
+		return fmt.Errorf("authenticating telemetry upload timed out: %w", r.Context().Err())
+	}
+}
+
 func attempt(ctx context.Context, apiClient *client.DatabricksClient, protoLogs []string) (*ResponseBody, error) {
 	// Without the workspace routing header, telemetry on unified hosts is
 	// recorded in a central shard instead of the user's workspace.
@@ -218,4 +284,19 @@ func attempt(ctx context.Context, apiClient *client.DatabricksClient, protoLogs 
 	}
 
 	return resp, nil
+}
+
+// BufferedEvents returns the events logged on ctx, or nil when ctx has no
+// logger. Upload does not clear them. Tests in other packages use it to assert
+// what a command logs without uploading.
+func BufferedEvents(ctx context.Context) []protos.DatabricksCliLog {
+	l, ok := loggerFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	out := make([]protos.DatabricksCliLog, len(l.logs))
+	for i, fl := range l.logs {
+		out[i] = fl.Entry.DatabricksCliLog
+	}
+	return out
 }

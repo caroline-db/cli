@@ -8,55 +8,35 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/databricks/cli/internal/testutil"
 	"github.com/databricks/cli/libs/cmdio"
 	"github.com/databricks/cli/libs/env"
 	"github.com/databricks/cli/libs/log"
-	"github.com/databricks/databricks-sdk-go/useragent"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// agentEnvVars are the env vars useragent.AgentProvider() inspects. Kept in
-// sync with listKnownAgents() in the SDK plus the AGENT/AI_AGENT fallbacks
-// (mirrors acceptance/acceptance_test.go).
-var agentEnvVars = []string{
-	"AGENT", "AI_AGENT", "AMP_CURRENT_THREAD_ID", "ANTIGRAVITY_AGENT",
-	"AUGMENT_AGENT", "CLAUDECODE", "CLINE_ACTIVE", "CODEX_CI", "COPILOT_CLI",
-	"CURSOR_AGENT", "GEMINI_CLI", "GOOSE_TERMINAL", "KIRO", "OPENCLAW_SHELL",
-	"OPENCODE", "VSCODE_AGENT", "WINDSURF_AGENT",
-}
-
-// clearAgentEnv unsets every agent-detection env var (restoring them after the
-// test) so the host agent driving this test binary does not leak into
-// AgentProvider(). t.Setenv cannot unset, hence the manual save/restore.
-func clearAgentEnv(t *testing.T) {
-	for _, v := range agentEnvVars {
-		if orig, ok := os.LookupEnv(v); ok {
-			t.Cleanup(func() { os.Setenv(v, orig) }) //nolint:usetesting // restoring, not setting fresh
-			os.Unsetenv(v)                           //nolint:usetesting // t.Setenv cannot unset
-		}
-	}
-}
-
 // setClaudeAgent makes useragent.AgentProvider() report Claude Code for this
-// test. It clears the ambient agent env, sets CLAUDECODE, and resets the SDK's
-// process-global cache, so these tests must not run in parallel. The cleanup
-// clears the cache again so the value never leaks into another test.
+// test, with the host's agent env cleared. These tests must not run in
+// parallel (see agenttest.SetAgentEnv). The first t.TempDir call runs before
+// SetAgentEnv clears TMPDIR / TEMP, so later calls in the test still work.
 func setClaudeAgent(t *testing.T) {
-	clearAgentEnv(t)
-	t.Setenv("CLAUDECODE", "1")
-	useragent.ClearCache()
-	t.Cleanup(useragent.ClearCache)
+	t.TempDir()
+	testutil.SetAgentEnv(t, "CLAUDECODE", "1")
 }
 
 // claudeCtx returns a context with a captured stderr buffer and an isolated
 // HOME + cache dir, so detection and the session throttle read only the test's
-// temp state. home is returned so the test can drop fixtures under it.
+// temp state. It also hides the host's Claude config dir and session id, which
+// would otherwise move detection or throttling outside home. home is returned
+// so the test can drop fixtures under it.
 func claudeCtx(t *testing.T, home string) (context.Context, *bytes.Buffer) {
 	ctx, stderr := cmdio.NewTestContextWithStderr(t.Context())
 	ctx = env.WithUserHomeDir(ctx, home)
 	ctx = env.Set(ctx, "DATABRICKS_CACHE_DIR", t.TempDir())
+	ctx = env.Set(ctx, "CLAUDE_CONFIG_DIR", "")
+	ctx = env.Set(ctx, claudeSessionEnv, "")
 	return ctx, stderr
 }
 
@@ -74,11 +54,10 @@ func writeCanonicalSkill(t *testing.T, home, name string) {
 
 func TestMaybeHint_HumanCallerSilent(t *testing.T) {
 	// No agent env: AgentProvider() == "", so no hint even with nothing installed.
-	clearAgentEnv(t)
-	useragent.ClearCache()
-	t.Cleanup(useragent.ClearCache)
+	home := t.TempDir()
+	testutil.SetAgentEnv(t)
 	ctx, stderr := cmdio.NewTestContextWithStderr(t.Context())
-	ctx = env.WithUserHomeDir(ctx, t.TempDir())
+	ctx = env.WithUserHomeDir(ctx, home)
 	MaybeHint(ctx, regularCmd())
 	assert.Empty(t, stderr.String())
 }
@@ -123,7 +102,6 @@ func TestClaudeToolingInstalled_LogsPluginVersion(t *testing.T) {
 }
 
 func TestMaybeHint_CustomClaudeConfigDir(t *testing.T) {
-	setClaudeAgent(t)
 	for _, tc := range []struct {
 		name             string
 		customInstalled  bool
@@ -136,6 +114,7 @@ func TestMaybeHint_CustomClaudeConfigDir(t *testing.T) {
 		{"neither plugin", false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			setClaudeAgent(t)
 			home := t.TempDir()
 			customHome := t.TempDir()
 			ctx, stderr := claudeCtx(t, home)
@@ -216,6 +195,8 @@ func TestMaybeHint_ThrottledPerSession(t *testing.T) {
 		ctx, stderr := cmdio.NewTestContextWithStderr(t.Context())
 		ctx = env.WithUserHomeDir(ctx, home)
 		ctx = env.Set(ctx, "DATABRICKS_CACHE_DIR", cacheDir)
+		ctx = env.Set(ctx, "DATABRICKS_CACHE_ENABLED", "true")
+		ctx = env.Set(ctx, "CLAUDE_CONFIG_DIR", "")
 		ctx = env.Set(ctx, claudeSessionEnv, "session-abc")
 		return ctx, stderr
 	}

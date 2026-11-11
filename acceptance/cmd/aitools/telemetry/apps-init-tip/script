@@ -1,0 +1,12 @@
+# Isolate HOME so the real machine's agents and skills are not seen.
+sethome home
+export CLAUDECODE=1
+unset CLAUDE_CODE_SESSION_ID
+unset CLAUDE_CONFIG_DIR
+# A Claude Code config dir with no Databricks skills is what makes apps init print its tip.
+mkdir -p "${USERPROFILE:-$HOME}/.claude"
+
+title "apps init with flags prints the tip: one hint-shown event per hint printed\n"
+trace $CLI apps init --template ./template --skip-install --name app-tip > /dev/null
+trace print_telemetry
+rm -rf app-tip

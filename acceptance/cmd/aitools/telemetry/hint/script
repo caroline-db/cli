@@ -1,0 +1,19 @@
+# Isolate HOME so the real machine's plugins and skills are not seen.
+sethome home
+export CLAUDECODE=1
+unset CLAUDE_CODE_SESSION_ID
+# A host CLAUDE_CONFIG_DIR would move the plugin file away from the isolated HOME.
+unset CLAUDE_CONFIG_DIR
+
+title "hint printed on an authenticated command: one hint-shown event is uploaded\n"
+trace $CLI current-user me > /dev/null
+trace print_telemetry
+
+title "hint printed on a command that resolves no auth: nothing is uploaded\n"
+trace $CLI version
+trace print_telemetry
+
+title "plugin installed: no hint, no event\n"
+sethome ./installed-home
+trace $CLI current-user me > /dev/null
+trace print_telemetry

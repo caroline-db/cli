@@ -9,6 +9,7 @@ import (
 	"github.com/databricks/cli/libs/cmdio"
 	"github.com/databricks/cli/libs/env"
 	"github.com/databricks/cli/libs/log"
+	"github.com/databricks/cli/libs/telemetry/protos"
 	"github.com/databricks/databricks-sdk-go/useragent"
 	"github.com/spf13/cobra"
 )
@@ -72,6 +73,7 @@ func MaybeHint(ctx context.Context, cmd *cobra.Command) {
 		return
 	}
 	cmdio.LogString(ctx, hintText)
+	LogHintShown(ctx, protos.AitoolsHintKindInstallText)
 	recordSessionHint(ctx)
 }
 
