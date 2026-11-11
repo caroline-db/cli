@@ -113,9 +113,10 @@ func flagErrorFunc(c *cobra.Command, err error) error {
 	return fmt.Errorf("%w\n\n%s", err, c.UsageString())
 }
 
-// Execute adds all child commands to the root command and sets flags appropriately.
-// This is called by main.main(). It only needs to happen once to the rootCmd.
-func Execute(ctx context.Context, cmd *cobra.Command) (err error) {
+// Execute runs the command that args resolve to. It is called by main.main()
+// with the process arguments. Unlike [cobra.Command.SetArgs], nil args mean no
+// arguments rather than the process arguments.
+func Execute(ctx context.Context, cmd *cobra.Command, args []string) (err error) {
 	defer func() {
 		r := recover()
 
@@ -150,6 +151,11 @@ Stack Trace:
 
 	// Set a command execution ID value in the context
 	ctx = cmdctx.GenerateExecId(ctx)
+
+	if args == nil {
+		args = []string{}
+	}
+	cmd.SetArgs(args)
 
 	startTime := time.Now()
 

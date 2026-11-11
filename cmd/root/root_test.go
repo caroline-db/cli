@@ -45,7 +45,7 @@ func TestExecuteEnrichesAuthErrors(t *testing.T) {
 		return nil
 	}
 
-	err := Execute(ctx, cmd)
+	err := Execute(ctx, cmd, nil)
 	require.Error(t, err)
 
 	output := stderr.String()
@@ -71,7 +71,7 @@ func TestExecuteNoEnrichmentWithoutConfigUsed(t *testing.T) {
 	}
 	cmd.SetErr(stderr)
 
-	err := Execute(ctx, cmd)
+	err := Execute(ctx, cmd, nil)
 	require.Error(t, err)
 
 	output := stderr.String()
@@ -144,7 +144,7 @@ func TestExecuteAppendsAccountHostHint(t *testing.T) {
 				return nil
 			}
 
-			err := Execute(t.Context(), cmd)
+			err := Execute(t.Context(), cmd, nil)
 			require.Error(t, err)
 
 			output := stderr.String()
@@ -173,7 +173,7 @@ func TestExecuteErrAlreadyPrintedNotEnriched(t *testing.T) {
 	}
 	cmd.SetErr(stderr)
 
-	err := Execute(ctx, cmd)
+	err := Execute(ctx, cmd, nil)
 	require.Error(t, err)
 	assert.Empty(t, stderr.String())
 }
