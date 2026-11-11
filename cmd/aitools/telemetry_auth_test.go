@@ -25,6 +25,12 @@ func setTelemetryAuth(t *testing.T, budget time.Duration, resolve func(cmd *cobr
 	telemetryAuthBudget = budget
 }
 
+// noTelemetryAuth replaces the auth resolver with a no-op, so a test that runs
+// an instrumented command through Execute never resolves the host's auth.
+func noTelemetryAuth(t *testing.T) {
+	setTelemetryAuth(t, time.Second, func(*cobra.Command, []string) {})
+}
+
 // authTestCmd returns a command wired with withTelemetryAuth whose RunE
 // records the context it ended with, plus a --profile flag like root's.
 // Telemetry is enabled on its context whatever the outer environment says.

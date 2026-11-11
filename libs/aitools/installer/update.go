@@ -83,7 +83,7 @@ func UpdateSkills(ctx context.Context, src ManifestSource, targetAgents []*agent
 		if scope == ScopeGlobal && hasLegacyInstall(ctx, baseDir) {
 			return nil, errors.New("found skills from a previous install without state tracking; run 'databricks aitools install' to refresh before updating")
 		}
-		return nil, errors.New("no skills or plugins installed. Run 'databricks aitools install' to install")
+		return nil, fmt.Errorf("%w. Run 'databricks aitools install' to install", ErrNothingInstalled)
 	}
 
 	installedRef, allowFallback := installedSkillsRelease(state)
@@ -422,16 +422,19 @@ func dirMatchesRecords(dir, skillName string, state *InstallState) bool {
 	return seen == len(recorded)
 }
 
-// PluginUpdate records that a plugin was updated for an agent.
+// PluginUpdate records a plugin update for an agent. Err is set when the
+// update failed and the plugin was skipped with a warning.
 type PluginUpdate struct {
 	Agent   string
 	Version string
+	Err     error
 }
 
 // UpdateInstalledPlugins runs the plugin update for every plugin recorded in the
 // given scope's state, bumping each record's version to ref. A plugin that can't
 // be updated (CLI missing, etc.) is skipped with a warning, never failed, to
-// keep the non-interactive update prompt-free and exit-0 on partial success.
+// keep the non-interactive update prompt-free and exit-0 on partial success;
+// it is returned after the updated ones with Err set.
 func UpdateInstalledPlugins(ctx context.Context, scope, ref string) ([]PluginUpdate, error) {
 	dir, err := skillsDir(ctx, scope)
 	if err != nil {
@@ -446,7 +449,7 @@ func UpdateInstalledPlugins(ctx context.Context, scope, ref string) ([]PluginUpd
 	}
 
 	version := DisplaySkillsVersion(ref)
-	var updated []PluginUpdate
+	var updated, failed []PluginUpdate
 	for _, name := range slices.Sorted(maps.Keys(state.Plugins)) {
 		agent := agents.ByName(name)
 		if agent == nil {
@@ -456,6 +459,7 @@ func UpdateInstalledPlugins(ctx context.Context, scope, ref string) ([]PluginUpd
 		rec := state.Plugins[name]
 		if err := UpdatePluginForAgent(ctx, agent, rec); err != nil {
 			log.Warnf(ctx, "Skipped %s: %v", agent.DisplayName, err)
+			failed = append(failed, PluginUpdate{Agent: agent.DisplayName, Err: err})
 			continue
 		}
 		rec.Version = version
@@ -469,7 +473,7 @@ func UpdateInstalledPlugins(ctx context.Context, scope, ref string) ([]PluginUpd
 			return nil, err
 		}
 	}
-	return updated, nil
+	return append(updated, failed...), nil
 }
 
 // FormatUpdateResult returns a human-readable summary of the update result.

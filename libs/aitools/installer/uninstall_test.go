@@ -2,6 +2,7 @@ package installer
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -138,8 +139,8 @@ func TestUninstallNoStateReturnsError(t *testing.T) {
 	ctx := cmdio.MockDiscard(t.Context())
 
 	err := UninstallSkills(ctx)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no skills or plugins installed")
+	assert.ErrorIs(t, err, ErrNothingInstalled)
+	assert.EqualError(t, err, "no skills or plugins installed")
 }
 
 func TestUninstallHandlesMissingDirectories(t *testing.T) {
@@ -388,6 +389,121 @@ func TestUninstallTargetedAgentRemovesCanonicalWhenNoExposureRemains(t *testing.
 	state, err := LoadState(globalDir)
 	require.NoError(t, err)
 	assert.Nil(t, state)
+}
+
+// Uninstall counts a skill as removed only when its canonical dir or a targeted
+// agent's entry was removed, so telemetry can tell a run that removed nothing
+// from a success.
+func TestUninstallCountsRemovedSkills(t *testing.T) {
+	tmp := setupTestHome(t)
+	// Agent dirs derive from the temp HOME, not from the host's overrides.
+	for _, v := range []string{"CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "GEMINI_CLI_HOME", "GOOSE_PATH_ROOT", "APPDATA", "XDG_CONFIG_HOME"} {
+		t.Setenv(v, "")
+	}
+	ctx := cmdio.MockDiscard(t.Context())
+	setupFetchMock(t)
+	t.Setenv("DATABRICKS_SKILLS_REF", testSkillsRef)
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, ".claude"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, ".cursor"), 0o755))
+
+	install := func(a string) {
+		src := &mockManifestSource{manifest: testManifest()}
+		require.NoError(t, InstallSkillsForAgents(ctx, src, []*agents.Agent{agents.ByName(a)}, InstallOptions{SpecificSkills: []string{"databricks-sql"}}))
+	}
+	claudeLink := filepath.Join(tmp, ".claude", "skills", "databricks-sql")
+	cursorLink := filepath.Join(tmp, ".cursor", "skills", "databricks-sql")
+
+	// Only Claude Code has the skill: there is nothing to remove for Cursor.
+	install(agents.NameClaudeCode)
+	result, err := UninstallSkillsWithResult(ctx, UninstallOptions{Agents: []string{agents.NameCursor}})
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.SkillsRemoved)
+	_, err = os.Lstat(claudeLink)
+	assert.NoError(t, err)
+
+	// Both have it, but Cursor's entry cannot be removed: nothing counts as
+	// removed, the failure is reported, and Claude Code keeps the skill.
+	install(agents.NameCursor)
+	orig := removeAllFn
+	t.Cleanup(func() { removeAllFn = orig })
+	removeAllFn = func(path string) error {
+		if path == cursorLink {
+			return fs.ErrPermission
+		}
+		return orig(path)
+	}
+	result, err = UninstallSkillsWithResult(ctx, UninstallOptions{Agents: []string{agents.NameCursor}})
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.SkillsRemoved)
+	require.Len(t, result.SkillFailures, 1)
+	assert.ErrorIs(t, result.SkillFailures[0], fs.ErrPermission)
+	_, err = os.Lstat(claudeLink)
+	assert.NoError(t, err)
+	removeAllFn = orig
+
+	// Both have it: removed for Cursor, kept for Claude Code.
+	result, err = UninstallSkillsWithResult(ctx, UninstallOptions{Agents: []string{agents.NameCursor}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.SkillsRemoved)
+	assert.Empty(t, result.SkillFailures)
+	_, err = os.Lstat(cursorLink)
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+	_, err = os.Lstat(claudeLink)
+	assert.NoError(t, err)
+
+	// Full uninstall whose canonical dir removal fails: nothing counts as
+	// removed and the failure is reported.
+	removeAllFn = func(string) error { return fs.ErrPermission }
+	result, err = UninstallSkillsWithResult(ctx, UninstallOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.SkillsRemoved)
+	require.Len(t, result.SkillFailures, 1)
+	assert.ErrorIs(t, result.SkillFailures[0], fs.ErrPermission)
+	removeAllFn = orig
+
+	// Stale state whose skill dir is already gone: nothing counts as removed.
+	globalDir := filepath.Join(tmp, ".databricks", "aitools", "skills")
+	require.NoError(t, os.RemoveAll(filepath.Join(globalDir, "databricks-sql")))
+	require.NoError(t, SaveState(globalDir, &InstallState{SchemaVersion: schemaVersionV2, Skills: map[string]string{"databricks-sql": "0.1.0"}}))
+	result, err = UninstallSkillsWithResult(ctx, UninstallOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.SkillsRemoved)
+}
+
+// Telemetry reports the first skill failure's category, so the failures must
+// come in a stable (sorted) order, not the state map's iteration order.
+func TestUninstallSkillFailuresAreSorted(t *testing.T) {
+	tmp := setupTestHome(t)
+	for _, v := range []string{"CLAUDE_CONFIG_DIR", "PI_CODING_AGENT_DIR", "GEMINI_CLI_HOME", "GOOSE_PATH_ROOT", "APPDATA", "XDG_CONFIG_HOME"} {
+		t.Setenv(v, "")
+	}
+	ctx := cmdio.MockDiscard(t.Context())
+	globalDir := filepath.Join(tmp, ".databricks", "aitools", "skills")
+	names := []string{"skill-a", "skill-b", "skill-c", "skill-d", "skill-e", "skill-f"}
+	skills := map[string]string{}
+	for _, name := range names {
+		require.NoError(t, os.MkdirAll(filepath.Join(globalDir, name), 0o755))
+		skills[name] = "0.1.0"
+	}
+	require.NoError(t, SaveState(globalDir, &InstallState{SchemaVersion: schemaVersionV2, Skills: skills}))
+
+	orig := removeAllFn
+	t.Cleanup(func() { removeAllFn = orig })
+	removeAllFn = func(path string) error {
+		return fmt.Errorf("%s: %w", filepath.Base(path), fs.ErrPermission)
+	}
+	result, err := UninstallSkillsWithResult(ctx, UninstallOptions{})
+	require.NoError(t, err)
+
+	var got []string
+	for _, err := range result.SkillFailures {
+		got = append(got, err.Error())
+	}
+	var want []string
+	for _, name := range names {
+		want = append(want, name+": "+fs.ErrPermission.Error())
+	}
+	assert.Equal(t, want, got)
 }
 
 func TestUninstallTargetedUntrackedSkillGivesRecoveryGuidance(t *testing.T) {

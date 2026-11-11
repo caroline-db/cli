@@ -1,0 +1,4 @@
+# `aitools version` prints the install date.
+[[Repls]]
+Old = 'Last updated: \d{4}-\d{2}-\d{2}'
+New = 'Last updated: [DATE]'

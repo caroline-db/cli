@@ -1,6 +1,14 @@
 package installer
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrNothingInstalled reports that update or uninstall found no install state
+// in the scope. The command layer matches it with errors.Is to tell "nothing to
+// act on" apart from a failure.
+var ErrNothingInstalled = errors.New("no skills or plugins installed")
 
 // SkillError reports that a skill named via --skills could not be resolved from
 // the manifest. Reason drives telemetry categorization (the command layer maps

@@ -91,7 +91,8 @@ const (
 	// The user declined the confirm prompt, aborted a prompt, or confirmed the
 	// agent picker with nothing selected.
 	AitoolsCommandOutcomeCancelled AitoolsCommandOutcome = "CANCELLED"
-	// The command had nothing to act on (e.g. no coding agents detected).
+	// The command had nothing to act on (e.g. no coding agents detected, or
+	// nothing installed to update or uninstall).
 	AitoolsCommandOutcomeNothingToDo AitoolsCommandOutcome = "NOTHING_TO_DO"
 )
 
@@ -109,10 +110,11 @@ const (
 	AitoolsInstallModePath AitoolsInstallMode = "PATH"
 )
 
-// AitoolsCommandEvent is one funnel event of an aitools subcommand. Every
-// install run that gets past flag parsing emits a STARTED event, a
-// STEP_COMPLETED event per step reached and a FINISHED event. All events of one
-// run share ExecutionContext.CmdExecID.
+// AitoolsCommandEvent is one funnel event of an aitools subcommand. Every run
+// of install, update, list, version and uninstall that gets past flag parsing
+// emits a STARTED event and a FINISHED event; install also emits a
+// STEP_COMPLETED event per step reached. All events of one run share
+// ExecutionContext.CmdExecID.
 // The calling agent is not a field: the User-Agent of the telemetry upload
 // carries it, together with the same cmd-exec-id.
 type AitoolsCommandEvent struct {

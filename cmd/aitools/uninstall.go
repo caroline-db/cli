@@ -3,17 +3,17 @@ package aitools
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/databricks/cli/libs/aitools/installer"
 	"github.com/databricks/cli/libs/cmdio"
+	"github.com/databricks/cli/libs/telemetry/protos"
 	"github.com/spf13/cobra"
 )
 
 // Package-level for testability. Tests override via uninstall_test.go.
-var uninstallSkillsFn = func(ctx context.Context, opts installer.UninstallOptions) error {
-	return installer.UninstallSkillsOpts(ctx, opts)
-}
+var uninstallSkillsFn = installer.UninstallSkillsWithResult
 
 func NewUninstallCmd() *cobra.Command {
 	var skillsFlag, agentsFlag, scopeFlag string
@@ -31,7 +31,7 @@ By default, removes all skills. Use --skills to remove specific skills only.`,
 
 			projectFlag, globalFlag, err := parseScopeFlag(scopeFlag, projectFlag, globalFlag, false)
 			if err != nil {
-				return err
+				return withCategory(err, protos.AitoolsErrorCategoryInvalidFlags)
 			}
 
 			globalDir, err := installer.GlobalSkillsDir(ctx)
@@ -78,11 +78,21 @@ By default, removes all skills. Use --skills to remove specific skills only.`,
 				}
 				if !proceed {
 					cmdio.LogString(ctx, "Cancelled.")
+					funnelCancelled(cmd.Context())
 					return nil
 				}
 			}
 
-			return uninstallSkillsFn(ctx, opts)
+			result, err := uninstallSkillsFn(ctx, opts)
+			if err != nil {
+				return err
+			}
+			// A plugin or skill that could not be removed is only a warning.
+			failures := slices.Concat(result.PluginFailures, result.SkillFailures)
+			if len(failures) > 0 && result.PluginsRemoved == 0 && result.SkillsRemoved == 0 {
+				funnelAllAttemptsFailed(ctx, failures[0])
+			}
+			return nil
 		},
 	}
 
@@ -93,7 +103,7 @@ By default, removes all skills. Use --skills to remove specific skills only.`,
 	cmd.Flags().BoolVar(&projectFlag, "project", false, "Uninstall project-scoped skills")
 	cmd.Flags().BoolVar(&globalFlag, "global", false, "Uninstall globally-scoped skills")
 	markScopeBoolsDeprecated(cmd)
-	return cmd
+	return instrumentCommand(cmd, protos.AitoolsCommandUninstall)
 }
 
 // confirmUninstall asks the user to confirm a destructive uninstall, summarizing

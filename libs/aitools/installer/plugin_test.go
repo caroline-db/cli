@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"path/filepath"
@@ -461,6 +462,56 @@ func TestUpdateInstalledPluginsUsesRecordedClaudeScope(t *testing.T) {
 			assert.Contains(t, cmds, "claude plugin update databricks@claude-plugins-official --scope "+scope)
 		})
 	}
+}
+
+// A plugin whose CLI is missing is skipped with a warning (no error), and
+// reported so telemetry can tell a run that did nothing from a success.
+func TestPluginOperationsReportFailures(t *testing.T) {
+	saveCopilotPlugin := func(t *testing.T) (context.Context, string) {
+		setupTestHome(t)
+		stubAgentLookPath(t, false)
+		ctx := cmdio.MockDiscard(t.Context())
+		dir, err := GlobalSkillsDir(ctx)
+		require.NoError(t, err)
+		require.NoError(t, SaveState(dir, &InstallState{
+			SchemaVersion: schemaVersionV2,
+			Release:       "v0.2.6",
+			Plugins: map[string]PluginRecord{
+				agents.NameCopilot: {Marketplace: "databricks-agent-skills", Plugin: "databricks", Scope: "user", Version: "0.2.6"},
+			},
+		}))
+		return ctx, dir
+	}
+
+	t.Run("update", func(t *testing.T) {
+		ctx, dir := saveCopilotPlugin(t)
+		results, err := UpdateInstalledPlugins(ctx, ScopeGlobal, "v0.2.7")
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		blocked, ok := errors.AsType[*BlockedError](results[0].Err)
+		require.True(t, ok, "got %v", results[0].Err)
+		assert.Equal(t, ReasonCLINotOnPath, blocked.Reason)
+
+		state, err := LoadState(dir)
+		require.NoError(t, err)
+		assert.Equal(t, "0.2.6", state.Plugins[agents.NameCopilot].Version)
+	})
+
+	t.Run("uninstall", func(t *testing.T) {
+		ctx, dir := saveCopilotPlugin(t)
+		result, err := UninstallSkillsWithResult(ctx, UninstallOptions{Scope: ScopeGlobal})
+		require.NoError(t, err)
+		assert.Equal(t, 0, result.PluginsRemoved)
+		assert.Equal(t, 0, result.SkillsRemoved)
+		require.Len(t, result.PluginFailures, 1)
+		blocked, ok := errors.AsType[*BlockedError](result.PluginFailures[0])
+		require.True(t, ok, "got %v", result.PluginFailures[0])
+		assert.Equal(t, ReasonCLINotOnPath, blocked.Reason)
+
+		state, err := LoadState(dir)
+		require.NoError(t, err)
+		assert.Contains(t, state.Plugins, agents.NameCopilot)
+	})
 }
 
 func TestUninstallSkillsOptsUsesRecordedClaudeScope(t *testing.T) {

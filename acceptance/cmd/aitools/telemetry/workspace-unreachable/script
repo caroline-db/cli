@@ -1,0 +1,17 @@
+# Isolate HOME so the real machine's agents and skills are not seen.
+sethome home
+
+# The workspace host does not resolve, so the background telemetry auth
+# resolution fails to fetch host metadata. The skills manifest still comes from
+# the mock server (DATABRICKS_SKILLS_BASE_URL is set from the original host).
+# A hostmetadata warning only reaches the output if the failed lookup ends
+# within the auth budget, i.e. when .test resolution fails fast (NXDOMAIN). That
+# makes `version` the case that catches a regression; `list` exits before the
+# lookup fails.
+export DATABRICKS_HOST=https://unreachable.test
+
+title "version: the background auth resolution prints nothing\n"
+trace $CLI aitools version
+
+title "list: the background auth resolution prints nothing\n"
+trace $CLI aitools list

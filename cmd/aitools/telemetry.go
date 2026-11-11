@@ -336,13 +336,16 @@ func (f *commandFunnel) step(ctx context.Context, s protos.AitoolsCommandStep) {
 }
 
 // finish logs the FINISHED event for a run that returned err: SUCCESS for nil,
-// CANCELLED when the user aborted a prompt or picked no agents, FAILURE
-// otherwise. No-op once the run has finished, so it is safe to defer after an
-// explicit finishWith.
+// NOTHING_TO_DO when update or uninstall found nothing installed (the command
+// still exits non-zero), CANCELLED when the user aborted a prompt or picked no
+// agents, FAILURE otherwise. No-op once the run has finished, so it is safe to
+// defer after an explicit finishWith.
 func (f *commandFunnel) finish(ctx context.Context, err error) {
 	switch {
 	case err == nil:
 		f.finishWith(ctx, protos.AitoolsCommandOutcomeSuccess, protos.AitoolsErrorCategoryUnspecified)
+	case errors.Is(err, installer.ErrNothingInstalled):
+		f.finishWith(ctx, protos.AitoolsCommandOutcomeNothingToDo, protos.AitoolsErrorCategoryUnspecified)
 	case errors.Is(err, huh.ErrUserAborted):
 		f.finishWith(ctx, protos.AitoolsCommandOutcomeCancelled, protos.AitoolsErrorCategoryUserAborted)
 	case errors.Is(err, errNoAgentsSelected):
@@ -378,6 +381,38 @@ func (f *commandFunnel) log(ctx context.Context, e protos.AitoolsCommandEvent) {
 	e.InstallMode = f.installMode
 	e.Scope = f.scope
 	telemetry.Log(ctx, protos.DatabricksCliLog{AitoolsCommandEvent: &e})
+}
+
+// withCommandFunnel wraps a subcommand's RunE so every run logs STARTED and
+// FINISHED (outcome from the returned error).
+func withCommandFunnel(command protos.AitoolsCommand, runE func(cmd *cobra.Command, args []string) error) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) (err error) {
+		f := startFunnel(cmd.Context(), command, "")
+		defer func() { f.finish(cmd.Context(), err) }()
+		cmd.SetContext(context.WithValue(cmd.Context(), funnelKey{}, f))
+		return runE(cmd, args)
+	}
+}
+
+type funnelKey struct{}
+
+// funnelCancelled records a run the user cancelled at a prompt while the
+// command still returns nil (e.g. answering "no" to uninstall's confirm), so
+// withCommandFunnel does not report it as SUCCESS. No-op outside a funnel.
+func funnelCancelled(ctx context.Context) {
+	if f, ok := ctx.Value(funnelKey{}).(*commandFunnel); ok {
+		f.finishWith(ctx, protos.AitoolsCommandOutcomeCancelled, protos.AitoolsErrorCategoryUnspecified)
+	}
+}
+
+// funnelAllAttemptsFailed records a run that returns nil (plugin failures and
+// skill removal failures are warnings) but did nothing, because every plugin or
+// skill operation it attempted failed or was skipped, as FAILURE with the first
+// cause's category. No-op outside a funnel.
+func funnelAllAttemptsFailed(ctx context.Context, firstErr error) {
+	if f, ok := ctx.Value(funnelKey{}).(*commandFunnel); ok {
+		f.finishWith(ctx, protos.AitoolsCommandOutcomeFailure, classifyInstallError(firstErr))
+	}
 }
 
 // installModeType maps the install delivery flags to the telemetry enum.
@@ -416,6 +451,14 @@ func deliverySteps(outcomes []agentOutcome) []protos.AitoolsCommandStep {
 		steps = append(steps, protos.AitoolsCommandStepPluginsInstalled)
 	}
 	return steps
+}
+
+// instrumentCommand makes an aitools subcommand log its STARTED and FINISHED
+// funnel events, and resolves auth best-effort so they can upload at exit.
+func instrumentCommand(cmd *cobra.Command, command protos.AitoolsCommand) *cobra.Command {
+	cmd.RunE = withCommandFunnel(command, cmd.RunE)
+	withTelemetryAuth(cmd)
+	return cmd
 }
 
 // nothingInstalledCategory reports whether a run that returned no error still

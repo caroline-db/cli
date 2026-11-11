@@ -5,3 +5,26 @@ mkdir -p "${USERPROFILE:-$HOME}/.cursor"
 title "install: STARTED, one event per step reached, FINISHED with SUCCESS\n"
 trace $CLI aitools install --skills-only --scope=global --agents=cursor
 trace print_telemetry
+
+title "update\n"
+trace $CLI aitools update --scope=global
+trace print_telemetry
+
+title "list\n"
+trace $CLI aitools list --scope=global > /dev/null
+trace print_telemetry
+
+title "version\n"
+trace $CLI aitools version
+trace print_telemetry
+
+title "uninstall\n"
+trace $CLI aitools uninstall --scope=global
+trace print_telemetry
+
+# The golden pins the error text and exit code, which stay as before.
+title "update and uninstall with nothing installed: FINISHED with NOTHING_TO_DO, no error category\n"
+errcode trace $CLI aitools update --scope=global
+trace print_telemetry
+errcode trace $CLI aitools uninstall --scope=global
+trace print_telemetry

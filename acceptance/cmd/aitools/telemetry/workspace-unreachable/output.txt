@@ -1,0 +1,17 @@
+
+=== version: the background auth resolution prints nothing
+
+>>> [CLI] aitools version
+No Databricks skills or plugins installed.
+
+Run 'databricks aitools install' to get started.
+
+=== list: the background auth resolution prints nothing
+
+>>> [CLI] aitools list
+Available raw skill directories (test-ref):
+
+  NAME             VERSION  INSTALLED
+  databricks-test  v1.0.0   not installed
+
+0/1 raw skill directories installed (global)

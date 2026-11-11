@@ -16,3 +16,66 @@ Installed 1 skill.
 {"command":"aitools_install","exit_code":0,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"SKILLS_INSTALLED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
 {"command":"aitools_install","exit_code":0,"aitools_install_event":{"agents":["CURSOR"],"scope":"GLOBAL","error_category":"TYPE_UNSPECIFIED"}}
 {"command":"aitools_install","exit_code":0,"aitools_command_event":{"command":"INSTALL","stage":"FINISHED","outcome":"SUCCESS","interactive":false,"install_mode":"SKILLS_ONLY","agents":["CURSOR"],"scope":"GLOBAL"}}
+
+=== update
+
+>>> [CLI] aitools update --scope=global
+Already up to date.
+
+>>> print_telemetry
+{"command":"aitools_update","exit_code":0,"aitools_command_event":{"command":"UPDATE","stage":"STARTED","interactive":false}}
+{"command":"aitools_update","exit_code":0,"aitools_command_event":{"command":"UPDATE","stage":"FINISHED","outcome":"SUCCESS","interactive":false}}
+
+=== list
+
+>>> [CLI] aitools list --scope=global
+Available raw skill directories (test-ref):
+
+  NAME             VERSION  INSTALLED
+  databricks-test  v1.0.0   v1.0.0 (up to date)
+
+1/1 raw skill directories installed (global)
+
+>>> print_telemetry
+{"command":"aitools_list","exit_code":0,"aitools_command_event":{"command":"LIST","stage":"STARTED","interactive":false}}
+{"command":"aitools_list","exit_code":0,"aitools_command_event":{"command":"LIST","stage":"FINISHED","outcome":"SUCCESS","interactive":false}}
+
+=== version
+
+>>> [CLI] aitools version
+Databricks skills and plugins:
+  Skills (global): test-ref (1 skill, up to date)
+  Last updated: [DATE]
+
+>>> print_telemetry
+{"command":"aitools_version","exit_code":0,"aitools_command_event":{"command":"VERSION","stage":"STARTED","interactive":false}}
+{"command":"aitools_version","exit_code":0,"aitools_command_event":{"command":"VERSION","stage":"FINISHED","outcome":"SUCCESS","interactive":false}}
+
+=== uninstall
+
+>>> [CLI] aitools uninstall --scope=global
+Uninstalled 1 skill.
+
+>>> print_telemetry
+{"command":"aitools_uninstall","exit_code":0,"aitools_command_event":{"command":"UNINSTALL","stage":"STARTED","interactive":false}}
+{"command":"aitools_uninstall","exit_code":0,"aitools_command_event":{"command":"UNINSTALL","stage":"FINISHED","outcome":"SUCCESS","interactive":false}}
+
+=== update and uninstall with nothing installed: FINISHED with NOTHING_TO_DO, no error category
+
+>>> [CLI] aitools update --scope=global
+Error: no skills or plugins installed. Run 'databricks aitools install' to install
+
+Exit code: 1
+
+>>> print_telemetry
+{"command":"aitools_update","exit_code":1,"aitools_command_event":{"command":"UPDATE","stage":"STARTED","interactive":false}}
+{"command":"aitools_update","exit_code":1,"aitools_command_event":{"command":"UPDATE","stage":"FINISHED","outcome":"NOTHING_TO_DO","interactive":false}}
+
+>>> [CLI] aitools uninstall --scope=global
+Error: no skills or plugins installed
+
+Exit code: 1
+
+>>> print_telemetry
+{"command":"aitools_uninstall","exit_code":1,"aitools_command_event":{"command":"UNINSTALL","stage":"STARTED","interactive":false}}
+{"command":"aitools_uninstall","exit_code":1,"aitools_command_event":{"command":"UNINSTALL","stage":"FINISHED","outcome":"NOTHING_TO_DO","interactive":false}}
