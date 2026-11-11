@@ -40,6 +40,9 @@ type BlockedError struct {
 	Agent  string
 	Reason string
 	Detail string
+	// TimedOut is set when the agent CLI was killed for exceeding its timeout,
+	// so the failure can be told apart from a missing or broken CLI.
+	TimedOut bool
 }
 
 // Reasons a plugin operation can be blocked.
@@ -66,12 +69,38 @@ func (e *BlockedError) Error() string {
 func runAgentCmd(ctx context.Context, timeout time.Duration, argv []string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return process.Background(cctx, argv)
+	out, err := process.Background(cctx, argv)
+	if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
+		return out, &agentCmdTimeoutError{timeout: timeout, err: err}
+	}
+	return out, err
+}
+
+// agentCmdTimeoutError reports an agent CLI command killed by its timeout.
+type agentCmdTimeoutError struct {
+	timeout time.Duration
+	err     error
+}
+
+func (e *agentCmdTimeoutError) Error() string {
+	return fmt.Sprintf("timed out after %s", e.timeout)
+}
+
+func (e *agentCmdTimeoutError) Unwrap() error { return e.err }
+
+// newBlockedError builds the BlockedError for a failed agent CLI command.
+func newBlockedError(agent *agents.Agent, reason string, err error) *BlockedError {
+	_, timedOut := errors.AsType[*agentCmdTimeoutError](err)
+	return &BlockedError{Agent: agent.Name, Reason: reason, Detail: stderrOf(err), TimedOut: timedOut}
 }
 
 // stderrOf returns the captured stderr of a failed agent command, falling back
 // to the error's own message. Callers must not branch on this string.
 func stderrOf(err error) string {
+	// A killed process has partial or no stderr; the timeout is the real cause.
+	if terr, ok := errors.AsType[*agentCmdTimeoutError](err); ok {
+		return terr.Error()
+	}
 	if perr, ok := errors.AsType[*process.ProcessError](err); ok {
 		if s := strings.TrimSpace(perr.Stderr); s != "" {
 			return s
@@ -235,7 +264,7 @@ func probePluginCLI(ctx context.Context, agent *agents.Agent) (string, error) {
 		return "", &BlockedError{Agent: agent.Name, Reason: ReasonCLINotOnPath, Detail: err.Error()}
 	}
 	if _, err := runAgentCmd(ctx, pluginProbeTimeout, []string{bin, "plugin", "--help"}); err != nil {
-		return "", &BlockedError{Agent: agent.Name, Reason: ReasonCLINotOnPath, Detail: stderrOf(err)}
+		return "", newBlockedError(agent, ReasonCLINotOnPath, err)
 	}
 	return bin, nil
 }
@@ -284,7 +313,7 @@ func InstallPluginForAgent(ctx context.Context, agent *agents.Agent, nativeScope
 				log.Warnf(ctx, "%s plugin install failed and the marketplace could not be de-registered: %v", agent.DisplayName, rmErr)
 			}
 		}
-		blocked := &BlockedError{Agent: agent.Name, Reason: ReasonInstallFailed, Detail: stderrOf(err)}
+		blocked := newBlockedError(agent, ReasonInstallFailed, err)
 		if refreshErr != nil {
 			blocked.Detail += " (refreshing the marketplace also failed: " + stderrOf(refreshErr) + ")"
 		}
@@ -319,7 +348,7 @@ func UpdatePluginForAgent(ctx context.Context, agent *agents.Agent, rec PluginRe
 	}
 	for _, args := range pluginUpdateSteps(agent, rec) {
 		if _, err := runAgentCmd(ctx, pluginCmdTimeout, prepend(bin, args)); err != nil {
-			return &BlockedError{Agent: agent.Name, Reason: ReasonInstallFailed, Detail: stderrOf(err)}
+			return newBlockedError(agent, ReasonInstallFailed, err)
 		}
 	}
 	return nil
@@ -344,11 +373,11 @@ func UninstallPluginForAgent(ctx context.Context, agent *agents.Agent, rec Plugi
 	}
 	if args := pluginDisableArgs(agent, rec); args != nil {
 		if _, err := runAgentCmd(ctx, pluginCmdTimeout, prepend(bin, args)); err != nil && !claudeAlreadyDisabled(err) {
-			return &BlockedError{Agent: agent.Name, Reason: ReasonInstallFailed, Detail: stderrOf(err)}
+			return newBlockedError(agent, ReasonInstallFailed, err)
 		}
 	}
 	if _, err := runAgentCmd(ctx, pluginCmdTimeout, prepend(bin, pluginUninstallArgs(agent, rec))); err != nil {
-		return &BlockedError{Agent: agent.Name, Reason: ReasonInstallFailed, Detail: stderrOf(err)}
+		return newBlockedError(agent, ReasonInstallFailed, err)
 	}
 	// Never de-register a Shared marketplace, it is shared infrastructure we don't own
 	if rec.InstalledMarketplace && !keepMarketplace && !agent.Plugin.Shared {

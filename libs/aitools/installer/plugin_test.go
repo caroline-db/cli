@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/databricks/cli/libs/aitools/agents"
 	"github.com/databricks/cli/libs/cmdio"
@@ -624,4 +625,20 @@ func TestRecordPluginInstallsThenSkillsInstallNoPanic(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, st.Skills)
 	assert.Contains(t, st.Plugins, agents.NameClaudeCode)
+}
+
+func TestRunAgentCmdReportsTimeout(t *testing.T) {
+	// A slow agent CLI used to be reported as "not on PATH" with whatever the
+	// killed process left on stderr.
+	ctx, stub := process.WithStub(t.Context())
+	stub.WithCallback(func(*exec.Cmd) error {
+		time.Sleep(50 * time.Millisecond)
+		return errors.New("signal: killed")
+	})
+
+	_, err := runAgentCmd(ctx, time.Millisecond, []string{"claude", "plugin", "--help"})
+	blocked := newBlockedError(claudeAgent(), ReasonCLINotOnPath, err)
+	assert.True(t, blocked.TimedOut)
+	assert.Equal(t, ReasonCLINotOnPath, blocked.Reason)
+	assert.Equal(t, "timed out after 1ms", blocked.Detail)
 }

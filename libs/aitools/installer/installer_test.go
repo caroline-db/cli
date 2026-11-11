@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"testing"
@@ -1495,7 +1496,7 @@ func TestGetPluginSkillsRefFallsBackWhenLookupFails(t *testing.T) {
 	t.Cleanup(func() { latestSkillsReleaseRefFn = orig })
 	latestSkillsReleaseRefFn = func(context.Context) (string, error) {
 		lookups++
-		return "", errors.New("HTTP 403 fetching latest skills release")
+		return "", &FetchError{Stage: FetchStageRelease, StatusCode: http.StatusForbidden, Err: errors.New("HTTP 403 fetching latest skills release")}
 	}
 	fallbackVersion, err := clicompat.ResolveEmbeddedAgentSkillsVersion()
 	require.NoError(t, err)
@@ -1506,4 +1507,114 @@ func TestGetPluginSkillsRefFallsBackWhenLookupFails(t *testing.T) {
 	// The embedded pin is also what forced-embedded resolution returns, so the
 	// ref alone does not prove the failing lookup ran.
 	assert.Equal(t, 1, lookups)
+}
+
+func TestFetchLatestSkillsReleaseRefRateLimited(t *testing.T) {
+	tests := []struct {
+		name        string
+		header      map[string]string
+		status      int
+		rateLimited bool
+	}{
+		{name: "403 with no remaining requests", status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "0"}, rateLimited: true},
+		{name: "403 secondary limit", status: http.StatusForbidden, header: map[string]string{"Retry-After": "60"}, rateLimited: true},
+		{name: "429", status: http.StatusTooManyRequests, rateLimited: true},
+		// A proxy or access policy denying the request is not a rate limit.
+		{name: "plain 403", status: http.StatusForbidden, rateLimited: false},
+		{name: "403 with requests left", status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "12"}, rateLimited: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				for k, v := range tc.header {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tc.status)
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("DATABRICKS_CLI_GITHUB_API_URL", server.URL)
+
+			_, err := fetchLatestSkillsReleaseRef(t.Context())
+			ferr, ok := errors.AsType[*FetchError](err)
+			require.True(t, ok, "want *FetchError, got %T", err)
+			assert.Equal(t, FetchStageRelease, ferr.Stage)
+			assert.Equal(t, tc.status, ferr.StatusCode)
+			assert.Equal(t, tc.rateLimited, ferr.RateLimited)
+		})
+	}
+}
+
+func TestFetchLatestSkillsReleaseRefUnusableResponse(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "HTML page", body: "<html>login</html>"},
+		{name: "empty body", body: ""},
+		{name: "empty tag_name", body: `{"tag_name": ""}`},
+		{name: "invalid tag", body: `{"tag_name": "not-a-version"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("DATABRICKS_CLI_GITHUB_API_URL", server.URL)
+
+			_, err := fetchLatestSkillsReleaseRef(t.Context())
+			ferr, ok := errors.AsType[*FetchError](err)
+			require.True(t, ok, "want *FetchError, got %T", err)
+			assert.Equal(t, FetchStageRelease, ferr.Stage)
+			assert.Equal(t, http.StatusOK, ferr.StatusCode)
+		})
+	}
+}
+
+func TestFetchErrorsCarryStage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("DATABRICKS_SKILLS_BASE_URL", server.URL)
+
+	_, err := (&GitHubManifestSource{}).FetchManifest(t.Context(), "v1")
+	ferr, ok := errors.AsType[*FetchError](err)
+	require.True(t, ok, "want *FetchError, got %T", err)
+	assert.Equal(t, FetchStageManifest, ferr.Stage)
+	assert.Equal(t, http.StatusServiceUnavailable, ferr.StatusCode)
+	assert.False(t, ferr.RateLimited)
+
+	_, err = fetchSkillFile(t.Context(), "v1", "skills", "s", "SKILL.md")
+	ferr, ok = errors.AsType[*FetchError](err)
+	require.True(t, ok, "want *FetchError, got %T", err)
+	assert.Equal(t, FetchStageFile, ferr.Stage)
+}
+
+func TestLoadStateCorruptReturnsStateError(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".state.json"), []byte("{not json"), 0o644))
+
+	_, err := LoadState(dir)
+	serr, ok := errors.AsType[*StateError](err)
+	require.True(t, ok, "want *StateError, got %T", err)
+	assert.Equal(t, filepath.Join(dir, ".state.json"), serr.Path)
+}
+
+func TestLoadStateUnreadableIsNotStateError(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions and a non-root user")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".state.json")
+	require.NoError(t, os.WriteFile(path, []byte("{}"), 0o644))
+	require.NoError(t, os.Chmod(path, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+
+	// An unreadable file is a permission problem, not invalid content: moving
+	// it aside would not help, so it must not look like a StateError.
+	_, err := LoadState(dir)
+	require.ErrorIs(t, err, fs.ErrPermission)
+	_, isState := errors.AsType[*StateError](err)
+	assert.False(t, isState)
 }

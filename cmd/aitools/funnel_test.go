@@ -331,7 +331,7 @@ func TestInstallFunnelPathDump(t *testing.T) {
 	ctx, err := runInstall(t, cmdio.MockDiscard(t.Context()), "--path", t.TempDir())
 	require.Error(t, err)
 	events := funnelEvents(ctx)
-	assert.Equal(t, []string{"STARTED", "FLAGS_VALIDATED", "FINISHED:FAILURE:NETWORK"}, funnelShape(events))
+	assert.Equal(t, []string{"STARTED", "FLAGS_VALIDATED", "FINISHED:FAILURE:SKILLS_FETCH_FAILED"}, funnelShape(events))
 	assert.Equal(t, protos.AitoolsInstallModePath, events[0].InstallMode)
 }
 
@@ -371,7 +371,7 @@ func TestListFunnelFailure(t *testing.T) {
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
 	require.Error(t, cmd.RunE(cmd, nil))
-	assert.Equal(t, []string{"STARTED", "FINISHED:FAILURE:NETWORK"}, funnelShape(funnelEvents(ctx)))
+	assert.Equal(t, []string{"STARTED", "FINISHED:FAILURE:SKILLS_FETCH_FAILED"}, funnelShape(funnelEvents(ctx)))
 }
 
 // A plugin failure for an auto-detected agent is only a warning (exit 0), but

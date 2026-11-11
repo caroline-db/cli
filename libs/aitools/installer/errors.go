@@ -3,6 +3,7 @@ package installer
 import (
 	"errors"
 	"fmt"
+	"net/http"
 )
 
 // ErrNothingInstalled reports that update or uninstall found no install state
@@ -39,3 +40,63 @@ func (e *SkillError) Error() string {
 	}
 	return fmt.Sprintf("skill %q %s", e.Skill, e.Reason)
 }
+
+// Stages of fetching skills content, recorded on FetchError so the command
+// layer can name the host the user has to reach.
+const (
+	// FetchStageRelease: resolving the latest skills release on api.github.com.
+	FetchStageRelease = "release"
+	// FetchStageManifest: downloading the skills manifest.
+	FetchStageManifest = "manifest"
+	// FetchStageFile: downloading one skill file.
+	FetchStageFile = "file"
+)
+
+// FetchError reports that skills content could not be downloaded, or that a
+// response arrived but could not be used (an unparsable manifest or release
+// payload). It wraps the cause without changing its message; StatusCode is 0
+// when no HTTP response arrived (DNS, proxy, TLS, timeout).
+type FetchError struct {
+	Stage      string
+	StatusCode int
+	// RateLimited is set when the server said the request exceeded a rate
+	// limit, as opposed to an ordinary 403 from an access policy or proxy.
+	RateLimited bool
+	Err         error
+}
+
+func (e *FetchError) Error() string { return e.Err.Error() }
+func (e *FetchError) Unwrap() error { return e.Err }
+
+// newHTTPFetchError builds the FetchError for a response with a non-OK status.
+func newHTTPFetchError(stage string, resp *http.Response, err error) *FetchError {
+	return &FetchError{Stage: stage, StatusCode: resp.StatusCode, RateLimited: isRateLimited(resp), Err: err}
+}
+
+// isRateLimited reports whether a response is a rate-limit refusal. 429 always
+// is; GitHub also answers 403 for exceeded limits, and then says so with
+// x-ratelimit-remaining: 0 (primary limit) or retry-after (secondary limit).
+// Any other 403 is an access failure.
+// See https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit.
+func isRateLimited(resp *http.Response) bool {
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests:
+		return true
+	case http.StatusForbidden:
+		return resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != ""
+	default:
+		return false
+	}
+}
+
+// StateError reports that the install state file exists but its content is
+// invalid. Path is the file, so the user can be told which one to move aside.
+// A file that cannot be read is not a StateError: that is a filesystem problem
+// (usually permissions), and moving the file aside would not fix it.
+type StateError struct {
+	Path string
+	Err  error
+}
+
+func (e *StateError) Error() string { return e.Err.Error() }
+func (e *StateError) Unwrap() error { return e.Err }

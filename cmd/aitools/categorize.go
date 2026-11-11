@@ -2,6 +2,7 @@ package aitools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"net"
@@ -60,6 +61,14 @@ func classifyInstallError(err error) protos.AitoolsErrorCategory {
 	if skill, ok := errors.AsType[*installer.SkillError](err); ok {
 		return skillErrorCategory(skill)
 	}
+	// FetchError wraps the net error that stdlibErrorCategory would otherwise
+	// report as NETWORK, so it has to be checked first.
+	if fetch, ok := errors.AsType[*installer.FetchError](err); ok {
+		return fetchErrorCategory(fetch)
+	}
+	if _, ok := errors.AsType[*installer.StateError](err); ok {
+		return protos.AitoolsErrorCategoryStateInvalid
+	}
 	if tagged, ok := errors.AsType[*categorizedError](err); ok {
 		return tagged.category
 	}
@@ -67,11 +76,12 @@ func classifyInstallError(err error) protos.AitoolsErrorCategory {
 }
 
 // stdlibErrorCategory classifies errors by their standard library type, which
-// the installer wraps with %w: network and timeout errors from fetching the
-// manifest or skill files, and filesystem errors from writing skills or the
-// install state. JSON decode errors stay UNCATEGORIZED: the manifest, the
-// release payload and the install state all decode JSON, so only typed
-// installer errors can tell MANIFEST_INVALID from STATE_INVALID.
+// the installer wraps with %w: filesystem errors from writing skills or the
+// install state, and network and timeout errors that no FetchError wraps (the
+// installer's own fetches return a FetchError, classified above). JSON decode
+// errors stay UNCATEGORIZED: the manifest, the release payload and the install
+// state all decode JSON, so only typed installer errors can tell
+// MANIFEST_INVALID from STATE_INVALID.
 func stdlibErrorCategory(err error) protos.AitoolsErrorCategory {
 	switch {
 	case errors.Is(err, huh.ErrUserAborted):
@@ -129,7 +139,40 @@ func skillErrorCategory(e *installer.SkillError) protos.AitoolsErrorCategory {
 	}
 }
 
+func fetchErrorCategory(e *installer.FetchError) protos.AitoolsErrorCategory {
+	switch {
+	// The command was interrupted while the request was in flight: the fetch
+	// did not fail on its own.
+	case errors.Is(e, context.Canceled):
+		return protos.AitoolsErrorCategoryCommandInterrupted
+	case e.RateLimited:
+		return protos.AitoolsErrorCategoryRateLimited
+	case errors.Is(e, clicompat.ErrNotFound):
+		return protos.AitoolsErrorCategoryManifestNotFound
+	// Before the decode check: a release payload that does not decode is a
+	// failed release lookup, not an invalid manifest.
+	case e.Stage == installer.FetchStageRelease:
+		return protos.AitoolsErrorCategoryReleaseLookupFailed
+	// The response arrived but was not a manifest: content, not transport.
+	case isManifestDecodeError(e):
+		return protos.AitoolsErrorCategoryManifestInvalid
+	default:
+		return protos.AitoolsErrorCategorySkillsFetchFailed
+	}
+}
+
+// isManifestDecodeError reports whether the response arrived but was not a
+// valid manifest.
+func isManifestDecodeError(err error) bool {
+	_, syntax := errors.AsType[*json.SyntaxError](err)
+	_, typ := errors.AsType[*json.UnmarshalTypeError](err)
+	return syntax || typ
+}
+
 func blockedErrorCategory(e *installer.BlockedError) protos.AitoolsErrorCategory {
+	if e.TimedOut {
+		return protos.AitoolsErrorCategoryPluginCLITimeout
+	}
 	switch e.Reason {
 	case installer.ReasonCLINotOnPath:
 		return protos.AitoolsErrorCategoryCLINotOnPath
