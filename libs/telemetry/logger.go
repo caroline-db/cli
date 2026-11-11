@@ -30,6 +30,12 @@ const (
 	timeoutEnvVar = "DATABRICKS_CLI_TELEMETRY_TIMEOUT"
 )
 
+// Disabled reports whether the user opted out of telemetry, in which case
+// Upload sends nothing.
+func Disabled(ctx context.Context) bool {
+	return env.Get(ctx, disableEnvVar) != ""
+}
+
 func Log(ctx context.Context, event protos.DatabricksCliLog) {
 	// A missing logger means telemetry was never initialized on this context
 	// (e.g. a command invoked outside the normal cmd/root setup). Dropping the
@@ -93,7 +99,7 @@ func Upload(ctx context.Context, ec protos.ExecutionContext) error {
 	}
 
 	// Telemetry is disabled. We don't upload logs.
-	if env.Get(ctx, disableEnvVar) != "" {
+	if Disabled(ctx) {
 		log.Debugf(ctx, "telemetry upload is disabled. Not uploading any logs.")
 		return nil
 	}
