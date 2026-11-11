@@ -94,6 +94,15 @@ func setupPluginMock(t *testing.T) *[]pluginCall {
 	return &calls
 }
 
+// stubLegacyCleanup skips the raw-skill cleanup that follows a plugin install;
+// the test agents have no config dir for it to inspect.
+func stubLegacyCleanup(t *testing.T) {
+	t.Helper()
+	orig := cleanupLegacyFn
+	t.Cleanup(func() { cleanupLegacyFn = orig })
+	cleanupLegacyFn = func(context.Context, *agents.Agent, string) error { return nil }
+}
+
 func setupScopeMock(t *testing.T, scope string) *bool {
 	t.Helper()
 	orig := promptScopeSelection
@@ -859,4 +868,40 @@ func TestResolveScopeValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInstallAgentCallerInPTYNeverPrompts(t *testing.T) {
+	// Cursor and Copilot run agent commands in a pseudo-terminal, so stdin is a
+	// TTY, but no human answers the prompts. The run must use the
+	// non-interactive defaults instead of blocking on the scope select.
+	setupTestAgents(t) // ~/.claude and ~/.cursor
+	fakeBinsOnPath(t, "claude")
+	t.Setenv("DATABRICKS_SKILLS_REF", "v0.2.6")
+	plugins := setupPluginMock(t)
+	skills := setupInstallMock(t)
+	stubLegacyCleanup(t)
+	scopePrompted := setupScopeMock(t, installer.ScopeProject)
+	origPrompt := promptAgentSelection
+	t.Cleanup(func() { promptAgentSelection = origPrompt })
+	promptAgentSelection = func(context.Context, []agentChoice) ([]*agents.Agent, error) {
+		t.Fatal("agent picker shown to an agent caller")
+		return nil, nil
+	}
+	origAgent := callerIsAgent
+	t.Cleanup(func() { callerIsAgent = origAgent })
+	callerIsAgent = func() bool { return true }
+
+	ctx, test := cmdio.SetupTest(t.Context(), cmdio.TestOptions{PromptSupported: true})
+	defer test.Done()
+	go drainReader(test.Stdout)
+	go drainReader(test.Stderr)
+	cmd := newTestInstallCmd()
+	cmd.SetContext(telemetry.WithNewLogger(ctx))
+
+	require.NoError(t, cmd.RunE(cmd, nil))
+	assert.False(t, *scopePrompted)
+	require.Len(t, *plugins, 1)
+	assert.Equal(t, agents.NameClaudeCode, (*plugins)[0].agent)
+	require.Len(t, *skills, 1)
+	assert.Equal(t, installer.ScopeGlobal, (*skills)[0].opts.Scope)
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/databricks/cli/libs/flags"
 	"github.com/databricks/cli/libs/log"
 	"github.com/databricks/cli/libs/telemetry/protos"
+	"github.com/databricks/databricks-sdk-go/useragent"
 	"github.com/spf13/cobra"
 )
 
@@ -26,11 +27,20 @@ var (
 	installPluginForAgentFn  = installer.InstallPluginForAgent
 	recordPluginInstallsFn   = installer.RecordPluginInstalls
 	cleanupLegacyFn          = installer.RemoveLegacyRawSkills
+	callerIsAgent            = func() bool { return useragent.AgentProvider() != "" }
 )
 
 // errNoAgentsSelected is returned when the picker is confirmed with nothing
 // checked. The funnel reports it as CANCELLED: the user chose to act on nothing.
 var errNoAgentsSelected = errors.New("at least one agent must be selected")
+
+// installPromptsSupported reports whether install may show its prompts. Agents
+// often run commands in a pseudo-terminal (Cursor, Copilot in the VS Code
+// terminal) where stdin looks like a TTY but nobody can answer a TUI prompt, so
+// an agent caller always gets the documented non-interactive defaults.
+func installPromptsSupported(ctx context.Context) bool {
+	return cmdio.IsPromptSupported(ctx) && !callerIsAgent()
+}
 
 // delivery is how the databricks tools are delivered to one agent.
 type delivery int
@@ -100,6 +110,9 @@ Agent selection:
   --agents <name>[,...]  Act only on the named agents (works for undetected ones).
   (unset, interactive)   A picker over all known agents, detected ones pre-checked.
   (unset, non-interactive) Act on every detected agent.
+
+Non-interactive runs (no terminal, or called by a coding agent) never prompt:
+scope defaults to global and agents to every detected one.
 
 Output:
   --output json          Emit a structured result instead of text. Requires --scope
@@ -191,7 +204,8 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 			}
 			funnel.step(ctx, protos.AitoolsCommandStepFlagsValidated)
 
-			scope, err := resolveScopeWithPrompt(ctx, projectFlag, globalFlag)
+			interactive := installPromptsSupported(ctx)
+			scope, err := resolveScopeWithPrompt(ctx, projectFlag, globalFlag, interactive)
 			if err != nil {
 				return promptError(err)
 			}
@@ -208,7 +222,7 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 					return err
 				}
 			} else {
-				targetAgents, err = selectAgents(ctx, scope, skillsOnly)
+				targetAgents, err = selectAgents(ctx, scope, skillsOnly, interactive)
 				if err != nil {
 					return promptError(err)
 				}
@@ -224,7 +238,7 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 			plan := buildPlan(targetAgents, scope, skillsOnly, explicit)
 
 			// In the interactive picker path, show a plan summary and confirm.
-			if !explicit && cmdio.IsPromptSupported(ctx) {
+			if !explicit && interactive {
 				printPlanSummary(ctx, plan, scope)
 				proceed, err := promptProceed()
 				if err != nil {
@@ -324,10 +338,10 @@ func installOutputIsJSON(cmd *cobra.Command) bool {
 // needs a config dir, so in --skills-only mode an agent is "detected" by its
 // config dir (PATH-independent); plugin delivery additionally detects agents by
 // their CLI binary on PATH, which fixes the Codex/Copilot config-dir miss.
-func selectAgents(ctx context.Context, scope string, skillsOnly bool) ([]*agents.Agent, error) {
+func selectAgents(ctx context.Context, scope string, skillsOnly, interactive bool) ([]*agents.Agent, error) {
 	// Interactive: the picker decides; a prompt error or empty selection is a real
 	// error, not a "nothing detected" no-op.
-	if cmdio.IsPromptSupported(ctx) {
+	if interactive {
 		choices := agentChoices(ctx, scope, skillsOnly)
 		if len(choices) == 0 {
 			// Agents were detected but none can be acted on in this scope; the

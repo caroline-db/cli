@@ -62,13 +62,13 @@ func resolveScope(project, global bool) (string, error) {
 // resolveScopeWithPrompt resolves scope with optional interactive prompt.
 // When neither flag is set: interactive mode shows a prompt (default: global),
 // non-interactive mode uses global.
-func resolveScopeWithPrompt(ctx context.Context, project, global bool) (string, error) {
+func resolveScopeWithPrompt(ctx context.Context, project, global, interactive bool) (string, error) {
 	if project || global {
 		return resolveScope(project, global)
 	}
 
 	// No flag: prompt if interactive, default to global otherwise.
-	if cmdio.IsPromptSupported(ctx) {
+	if interactive {
 		return promptScopeSelection(ctx)
 	}
 	return installer.ScopeGlobal, nil
