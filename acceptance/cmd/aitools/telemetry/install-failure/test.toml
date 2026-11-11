@@ -1,0 +1,25 @@
+[[Server]]
+Pattern = "GET /missing-ref/manifest.json"
+Response.StatusCode = 404
+
+[[Server]]
+Pattern = "GET /broken-ref/manifest.json"
+Response.StatusCode = 500
+
+# Only an experimental skill, so a dump without --experimental writes nothing.
+[[Server]]
+Pattern = "GET /experimental-ref/manifest.json"
+Response.Body = '''
+{
+  "version": "2",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "skills": {
+    "databricks-preview": {
+      "version": "1.0.0",
+      "description": "Experimental skill",
+      "files": ["SKILL.md"],
+      "repo_dir": "experimental"
+    }
+  }
+}
+'''

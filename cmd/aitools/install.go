@@ -28,6 +28,10 @@ var (
 	cleanupLegacyFn          = installer.RemoveLegacyRawSkills
 )
 
+// errNoAgentsSelected is returned when the picker is confirmed with nothing
+// checked. The funnel reports it as CANCELLED: the user chose to act on nothing.
+var errNoAgentsSelected = errors.New("at least one agent must be selected")
+
 // delivery is how the databricks tools are delivered to one agent.
 type delivery int
 
@@ -103,7 +107,7 @@ Output:
 
 Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			ctx := cmd.Context()
 			jsonMode := installOutputIsJSON(cmd)
 			if jsonMode {
@@ -113,15 +117,18 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 				ctx = cmdio.WithQuiet(ctx)
 			}
 
+			funnel := startFunnel(ctx, protos.AitoolsCommandInstall, installModeType(skillsOnly, pathFlag))
+			defer func() { funnel.finish(ctx, err) }()
+
 			if skillsOnly && pathFlag != "" {
-				return errors.New("cannot use --skills-only with --path; --path always writes raw skill files")
+				return withCategory(errors.New("cannot use --skills-only with --path; --path always writes raw skill files"), protos.AitoolsErrorCategoryInvalidFlags)
 			}
 
 			// --path is a plain file dump with no agents or install state, so there
 			// is no per-agent result to report. Reject --output json here rather than
 			// letting the dump run and silently emit no JSON.
 			if jsonMode && pathFlag != "" {
-				return errors.New("cannot use --output json with --path; --path writes raw skill files and produces no JSON result")
+				return withCategory(errors.New("cannot use --output json with --path; --path writes raw skill files and produces no JSON result"), protos.AitoolsErrorCategoryInvalidFlags)
 			}
 
 			opts := installer.InstallOptions{
@@ -133,20 +140,32 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 			// raw-skills delivery. The plugin is installed in full, so reject
 			// --skills unless raw skills were requested via --skills-only or --path.
 			if len(opts.SpecificSkills) > 0 && !skillsOnly && pathFlag == "" {
-				return errors.New("--skills requires --skills-only or --path; the databricks plugin is installed in full")
+				return withCategory(errors.New("--skills requires --skills-only or --path; the databricks plugin is installed in full"), protos.AitoolsErrorCategoryInvalidFlags)
 			}
 
 			src := &installer.GitHubManifestSource{}
 
 			// --path is a dumb dump: no agents, no scope, no state.
 			if pathFlag != "" {
-				_, err := installer.DumpSkillsToPath(ctx, src, pathFlag, opts)
-				return err
+				funnel.step(ctx, protos.AitoolsCommandStepFlagsValidated)
+				written, err := installer.DumpSkillsToPath(ctx, src, pathFlag, opts)
+				if err != nil {
+					return err
+				}
+				if written == 0 {
+					// Every skill was filtered out (e.g. all experimental without
+					// --experimental). The command still exits 0, but nothing was
+					// delivered, so the funnel must not report SUCCESS.
+					funnel.finishWith(ctx, protos.AitoolsCommandOutcomeFailure, protos.AitoolsErrorCategoryUncategorized)
+					return nil
+				}
+				funnel.step(ctx, protos.AitoolsCommandStepSkillsDumped)
+				return nil
 			}
 
 			projectFlag, globalFlag, err := parseScopeFlag(scopeFlag, projectFlag, globalFlag, false)
 			if err != nil {
-				return err
+				return withCategory(err, protos.AitoolsErrorCategoryInvalidFlags)
 			}
 
 			// JSON output must be fully non-interactive: every choice has to come
@@ -162,15 +181,23 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 					missing = append(missing, "--agents")
 				}
 				if len(missing) > 0 {
-					return fmt.Errorf("--output json requires %s so the command runs without interactive prompts", strings.Join(missing, " and "))
+					return withCategory(fmt.Errorf("--output json requires %s so the command runs without interactive prompts", strings.Join(missing, " and ")), protos.AitoolsErrorCategoryInvalidFlags)
 				}
 			}
+			// --project with --global is a flag error; check it here so it is not
+			// reported as a scope prompt failure below.
+			if _, err := resolveScope(projectFlag, globalFlag); err != nil {
+				return withCategory(err, protos.AitoolsErrorCategoryInvalidFlags)
+			}
+			funnel.step(ctx, protos.AitoolsCommandStepFlagsValidated)
 
 			scope, err := resolveScopeWithPrompt(ctx, projectFlag, globalFlag)
 			if err != nil {
-				return err
+				return promptError(err)
 			}
 			opts.Scope = scope
+			funnel.setScope(scope)
+			funnel.step(ctx, protos.AitoolsCommandStepScopeResolved)
 
 			// Resolve the agents to act on.
 			var targetAgents []*agents.Agent
@@ -183,13 +210,16 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 			} else {
 				targetAgents, err = selectAgents(ctx, scope, skillsOnly)
 				if err != nil {
-					return err
+					return promptError(err)
 				}
 				if len(targetAgents) == 0 {
 					printNoAgentsMessage(ctx)
+					funnel.finishWith(ctx, protos.AitoolsCommandOutcomeNothingToDo, protos.AitoolsErrorCategoryUnspecified)
 					return nil
 				}
 			}
+			funnel.setAgents(targetAgents)
+			funnel.step(ctx, protos.AitoolsCommandStepAgentsSelected)
 
 			plan := buildPlan(targetAgents, scope, skillsOnly, explicit)
 
@@ -198,13 +228,15 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 				printPlanSummary(ctx, plan, scope)
 				proceed, err := promptProceed()
 				if err != nil {
-					return err
+					return promptError(err)
 				}
 				if !proceed {
 					cmdio.LogString(ctx, "Cancelled.")
+					funnel.finishWith(ctx, protos.AitoolsCommandOutcomeCancelled, protos.AitoolsErrorCategoryUnspecified)
 					return nil
 				}
 			}
+			funnel.step(ctx, protos.AitoolsCommandStepPlanConfirmed)
 
 			var outcomes []agentOutcome
 			var runErr error
@@ -216,6 +248,23 @@ Supported agents: ` + strings.Join(agents.SupportedNames(), ", "),
 			}()
 
 			outcomes, runErr = executePlan(ctx, src, plan, opts, jsonMode)
+			for _, s := range deliverySteps(outcomes) {
+				funnel.step(ctx, s)
+			}
+			switch {
+			case runErr == nil:
+				if category, ok := nothingInstalledCategory(outcomes); ok {
+					funnel.finishWith(ctx, protos.AitoolsCommandOutcomeFailure, category)
+				}
+			case topLevelFailure(runErr) == nil:
+				// Named agents failed or were skipped. A skip has no error type of
+				// its own, so take the category from the outcomes, not runErr.
+				funnel.finishWith(ctx, protos.AitoolsCommandOutcomeFailure, firstFailureCategory(outcomes))
+			default:
+				// Finish on the real failure here: JSON mode returns the
+				// ErrAlreadyPrinted sentinel below.
+				funnel.finish(ctx, runErr)
+			}
 
 			if jsonMode {
 				if jerr := renderJSON(cmd.OutOrStdout(), buildInstallOutput(opts.Scope, outcomes, runErr)); jerr != nil {
@@ -381,7 +430,7 @@ func defaultPromptAgentSelection(_ context.Context, choices []agentChoice) ([]*a
 		return nil, err
 	}
 	if len(selected) == 0 {
-		return nil, errors.New("at least one agent must be selected")
+		return nil, errNoAgentsSelected
 	}
 
 	result := make([]*agents.Agent, 0, len(selected))
@@ -669,13 +718,13 @@ func resolveAgentNames(_ context.Context, names string) ([]*agents.Agent, error)
 		seen[name] = true
 		agent, ok := available[name]
 		if !ok {
-			return nil, fmt.Errorf("unknown agent %q. Available agents: %s", name, strings.Join(availableNames, ", "))
+			return nil, withCategory(fmt.Errorf("unknown agent %q. Available agents: %s", name, strings.Join(availableNames, ", ")), protos.AitoolsErrorCategoryUnknownAgent)
 		}
 		result = append(result, agent)
 	}
 
 	if len(result) == 0 {
-		return nil, errors.New("no agents specified")
+		return nil, withCategory(errors.New("no agents specified"), protos.AitoolsErrorCategoryInvalidFlags)
 	}
 	return result, nil
 }

@@ -1,0 +1,97 @@
+
+=== invalid flag combination fails before any step
+Error: cannot use --skills-only with --path; --path always writes raw skill files
+
+Exit code: 1
+
+>>> print_telemetry
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STARTED","interactive":false,"install_mode":"PATH"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"FINISHED","outcome":"FAILURE","error_category":"INVALID_FLAGS","interactive":false,"install_mode":"PATH"}}
+
+=== unknown agent fails after the scope step
+Error: unknown agent "no-such-agent". Available agents: claude-code, cursor, codex, opencode, copilot, antigravity, pi, gemini, goose, kiro
+
+Exit code: 1
+
+>>> print_telemetry
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STARTED","interactive":false,"install_mode":"SKILLS_ONLY"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"FLAGS_VALIDATED","interactive":false,"install_mode":"SKILLS_ONLY"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"SCOPE_RESOLVED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"FINISHED","outcome":"FAILURE","error_category":"UNKNOWN_AGENT","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+
+=== a skill missing from the manifest fails after the plan is confirmed
+Installing Databricks skills for Cursor...
+Using skills version test-ref
+Fetching skills manifest...
+Error: skill "nonexistent" not found
+
+Exit code: 1
+
+>>> print_telemetry
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STARTED","interactive":false,"install_mode":"SKILLS_ONLY"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"FLAGS_VALIDATED","interactive":false,"install_mode":"SKILLS_ONLY"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"SCOPE_RESOLVED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"AGENTS_SELECTED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"PLAN_CONFIRMED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"FINISHED","outcome":"FAILURE","error_category":"SKILL_NOT_FOUND","interactive":false,"install_mode":"SKILLS_ONLY","agents":["CURSOR"],"scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_install_event":{"agents":["CURSOR"],"scope":"GLOBAL","error_category":"SKILL_NOT_FOUND"}}
+
+=== a manifest the server does not have is MANIFEST_NOT_FOUND
+Installing Databricks skills for Cursor...
+Using skills version missing-ref
+Fetching skills manifest...
+Error: skills manifest at databricks-agent-skills@missing-ref: not found
+
+Exit code: 1
+
+>>> print_telemetry
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STARTED","interactive":false,"install_mode":"SKILLS_ONLY"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"FLAGS_VALIDATED","interactive":false,"install_mode":"SKILLS_ONLY"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"SCOPE_RESOLVED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"AGENTS_SELECTED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"PLAN_CONFIRMED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"FINISHED","outcome":"FAILURE","error_category":"MANIFEST_NOT_FOUND","interactive":false,"install_mode":"SKILLS_ONLY","agents":["CURSOR"],"scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_install_event":{"agents":["CURSOR"],"scope":"GLOBAL","error_category":"MANIFEST_NOT_FOUND"}}
+
+=== any other HTTP error status from the manifest fetch is not classified yet (the error is untyped)
+Installing Databricks skills for Cursor...
+Using skills version broken-ref
+Fetching skills manifest...
+Error: failed to fetch manifest: HTTP 500
+
+Exit code: 1
+
+>>> print_telemetry
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STARTED","interactive":false,"install_mode":"SKILLS_ONLY"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"FLAGS_VALIDATED","interactive":false,"install_mode":"SKILLS_ONLY"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"SCOPE_RESOLVED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"AGENTS_SELECTED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"PLAN_CONFIRMED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"FINISHED","outcome":"FAILURE","error_category":"UNCATEGORIZED","interactive":false,"install_mode":"SKILLS_ONLY","agents":["CURSOR"],"scope":"GLOBAL"}}
+{"command":"aitools_install","exit_code":1,"aitools_install_event":{"agents":["CURSOR"],"scope":"GLOBAL","error_category":"UNCATEGORIZED"}}
+
+=== a named agent skipped for the scope takes its category from the agent's outcome
+Skipped Cursor: does not support project-scoped skills
+Error: Cursor: does not support project-scoped skills
+
+Exit code: 1
+
+>>> print_telemetry
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STARTED","interactive":false,"install_mode":"SKILLS_ONLY"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"FLAGS_VALIDATED","interactive":false,"install_mode":"SKILLS_ONLY"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"SCOPE_RESOLVED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"PROJECT"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"AGENTS_SELECTED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"PROJECT"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"PLAN_CONFIRMED","interactive":false,"install_mode":"SKILLS_ONLY","scope":"PROJECT"}}
+{"command":"aitools_install","exit_code":1,"aitools_command_event":{"command":"INSTALL","stage":"FINISHED","outcome":"FAILURE","error_category":"UNSUPPORTED_SCOPE","interactive":false,"install_mode":"SKILLS_ONLY","agents":["CURSOR"],"scope":"PROJECT"}}
+{"command":"aitools_install","exit_code":1,"aitools_install_event":{"agents":["CURSOR"],"scope":"PROJECT","error_category":"TYPE_UNSPECIFIED","agent_results":[{"agent":"CURSOR","error_category":"UNSUPPORTED_SCOPE"}]}}
+
+=== a --path dump that writes no skill exits 0 but finishes as FAILURE, with no SKILLS_DUMPED step
+
+>>> env DATABRICKS_SKILLS_REF=experimental-ref [CLI] aitools install --path dump
+Using skills version experimental-ref
+Wrote 0 skills to dump
+
+>>> print_telemetry
+{"command":"aitools_install","exit_code":0,"aitools_command_event":{"command":"INSTALL","stage":"STARTED","interactive":false,"install_mode":"PATH"}}
+{"command":"aitools_install","exit_code":0,"aitools_command_event":{"command":"INSTALL","stage":"STEP_COMPLETED","step":"FLAGS_VALIDATED","interactive":false,"install_mode":"PATH"}}
+{"command":"aitools_install","exit_code":0,"aitools_command_event":{"command":"INSTALL","stage":"FINISHED","outcome":"FAILURE","error_category":"UNCATEGORIZED","interactive":false,"install_mode":"PATH"}}

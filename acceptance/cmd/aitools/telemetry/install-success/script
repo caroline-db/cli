@@ -1,0 +1,7 @@
+# Isolate HOME so parallel aitools tests don't race on a shared ~/.databricks.
+sethome home
+mkdir -p "${USERPROFILE:-$HOME}/.cursor"
+
+title "install: STARTED, one event per step reached, FINISHED with SUCCESS\n"
+trace $CLI aitools install --skills-only --scope=global --agents=cursor
+trace print_telemetry
