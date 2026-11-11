@@ -13,6 +13,7 @@ import (
 	"github.com/databricks/cli/libs/aitools/installer"
 	"github.com/databricks/cli/libs/clicompat"
 	"github.com/databricks/cli/libs/cmdio"
+	"github.com/databricks/cli/libs/telemetry/protos"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -112,7 +113,7 @@ func TestInstallRecovery(t *testing.T) {
 		},
 		{
 			name: "per-agent failures carry their own steps",
-			err:  &agentErrors{err: errors.New("Cursor: does not support project-scoped skills")},
+			err:  &agentErrors{err: errNothingInstalled},
 			want: "",
 		},
 		{
@@ -324,4 +325,15 @@ func TestPinnedRefRecoveryMentionsTheVariableOnlyWhenSet(t *testing.T) {
 	t.Setenv("DATABRICKS_SKILLS_REF", "v9.9.9")
 	err := &installer.FetchError{Stage: installer.FetchStageManifest, StatusCode: http.StatusNotFound, Err: fmt.Errorf("skills manifest at x@v9.9.9: %w", clicompat.ErrNotFound)}
 	assert.Equal(t, "No skills release exists at the version DATABRICKS_SKILLS_REF names. Unset it, or set it to a release tag from https://github.com/databricks/databricks-agent-skills/releases, then re-run 'databricks aitools install'.", installRecovery(t.Context(), err))
+}
+
+func TestNothingInstalledCarriesThePerAgentCategory(t *testing.T) {
+	codex := testPluginAgent(agents.NameCodex, "Codex CLI", "codex")
+	err := &agentErrors{err: newNothingInstalledError([]agentOutcome{{
+		agent: codex, delivery: deliverySkip, status: outcomeSkipped,
+		errorCategory: protos.AitoolsErrorCategoryUnsupportedScope, message: "Codex CLI is user-only; project scope is not supported",
+	}})}
+	assert.ErrorIs(t, err, errNothingInstalled)
+	assert.Equal(t, errNothingInstalled.Error(), err.Error())
+	assert.Equal(t, protos.AitoolsErrorCategoryUnsupportedScope, classifyInstallError(err))
 }

@@ -27,6 +27,35 @@ const (
 	cliIssuesURL      = "https://github.com/databricks/cli/issues"
 )
 
+// errNothingInstalled is returned when every agent in the plan was skipped or
+// failed. Each agent's reason and recovery step is printed above it, so the
+// message only has to make the exit code non-zero.
+var errNothingInstalled = errors.New("nothing was installed; follow the steps above for each agent")
+
+// nothingInstalledError is errNothingInstalled carrying the per-agent causes,
+// so classifyInstallError reports the first agent's category instead of
+// UNCATEGORIZED. Its message stays errNothingInstalled's.
+type nothingInstalledError struct {
+	causes []error
+}
+
+func (e *nothingInstalledError) Error() string { return errNothingInstalled.Error() }
+func (e *nothingInstalledError) Unwrap() []error {
+	return append([]error{errNothingInstalled}, e.causes...)
+}
+
+// newNothingInstalledError collects the failed and skipped outcomes as causes,
+// tagged with the category each one already carries.
+func newNothingInstalledError(outcomes []agentOutcome) error {
+	var causes []error
+	for _, o := range outcomes {
+		if o.status != outcomeInstalled {
+			causes = append(causes, withCategory(errors.New(o.message), o.errorCategory))
+		}
+	}
+	return &nothingInstalledError{causes: causes}
+}
+
 type rerunInvocationKey struct{}
 
 // withRerunInvocation records the flags a recovery step should tell the user

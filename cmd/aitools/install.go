@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -551,8 +552,9 @@ func topLevelFailure(runErr error) error {
 
 // executePlan carries out the plan and returns each agent's outcome. Skills
 // installs go through the existing skills path. Plugin installs are reported but
-// never silently fall back to skills: a blocked install is a warning (exit 0),
-// unless the agent was explicitly named via --agents, which is an error.
+// never silently fall back to skills: a blocked install is a warning, unless the
+// agent was explicitly named via --agents, which is an error. A run that sets up
+// no agent at all is an error too, so callers never mistake it for success.
 func executePlan(ctx context.Context, src installer.ManifestSource, plan []agentPlanItem, opts installer.InstallOptions, quiet bool) ([]agentOutcome, error) {
 	var skillsAgents []*agents.Agent
 	var pluginItems, skipItems []agentPlanItem
@@ -669,6 +671,9 @@ func executePlan(ctx context.Context, src installer.ManifestSource, plan []agent
 	}
 	if len(explicitErrs) > 0 {
 		return outcomes, &agentErrors{err: errors.Join(explicitErrs...)}
+	}
+	if !slices.ContainsFunc(outcomes, func(o agentOutcome) bool { return o.status == outcomeInstalled }) {
+		return outcomes, &agentErrors{err: newNothingInstalledError(outcomes)}
 	}
 	return outcomes, nil
 }

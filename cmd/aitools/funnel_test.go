@@ -6,6 +6,8 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -368,8 +370,8 @@ func TestListFunnelFailure(t *testing.T) {
 	assert.Equal(t, []string{"STARTED", "FINISHED:FAILURE:SKILLS_FETCH_FAILED"}, funnelShape(funnelEvents(ctx)))
 }
 
-// A plugin failure for an auto-detected agent is only a warning (exit 0), but
-// when nothing got installed the funnel must not report SUCCESS.
+// A plugin failure for an auto-detected agent is only a warning, but when
+// nothing got installed the run fails and the funnel must not report SUCCESS.
 func TestInstallFunnelDetectedPluginFailureIsNotSuccess(t *testing.T) {
 	isolateAgents(t)
 	tmp := t.TempDir()
@@ -384,8 +386,10 @@ func TestInstallFunnelDetectedPluginFailureIsNotSuccess(t *testing.T) {
 		return installer.PluginRecord{}, &installer.BlockedError{Agent: a.Name, Reason: installer.ReasonInstallFailed}
 	}
 
+	// The run installed nothing, so it exits non-zero; the error carries the
+	// agent's own category into the FINISHED event.
 	ctx, err := runInstall(t, cmdio.MockDiscard(t.Context()), "--scope", "global")
-	require.NoError(t, err)
+	require.ErrorIs(t, err, errNothingInstalled)
 	assert.Equal(t, []string{
 		"STARTED", "FLAGS_VALIDATED", "SCOPE_RESOLVED", "AGENTS_SELECTED", "PLAN_CONFIRMED",
 		"FINISHED:FAILURE:PLUGIN_INSTALL_FAILED",
@@ -691,4 +695,21 @@ func TestUninstallFunnelWhenRemovalsFail(t *testing.T) {
 			assert.Equal(t, []string{"STARTED", tc.want}, funnelShape(funnelEvents(ctx)))
 		})
 	}
+}
+
+func TestInstallFunnelNothingInstalledKeepsTheAgentCategory(t *testing.T) {
+	// Only Cursor is detected and it has no project-scoped skills, so the run
+	// sets up nothing. The FINISHED event must name why, not UNCATEGORIZED.
+	isolateAgents(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("USERPROFILE", tmp)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, ".config"))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmp, ".cursor"), 0o755))
+	setupInstallMock(t)
+
+	ctx, err := runInstall(t, cmdio.MockDiscard(t.Context()), "--skills-only", "--scope", "project")
+	require.ErrorIs(t, err, errNothingInstalled)
+	shape := funnelShape(funnelEvents(ctx))
+	assert.Equal(t, "FINISHED:FAILURE:UNSUPPORTED_SCOPE", shape[len(shape)-1])
 }
