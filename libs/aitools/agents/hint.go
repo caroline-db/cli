@@ -9,6 +9,7 @@ import (
 	"github.com/databricks/cli/libs/cmdio"
 	"github.com/databricks/cli/libs/env"
 	"github.com/databricks/cli/libs/log"
+	"github.com/databricks/cli/libs/telemetry/protos"
 	"github.com/databricks/databricks-sdk-go/useragent"
 	"github.com/spf13/cobra"
 )
@@ -49,8 +50,9 @@ const hintSessionTTL = time.Hour
 // tooling when Claude Code drives the CLI without it installed. It is a no-op
 // for human callers, other agents, aitools commands themselves, when there is
 // no output stream, once the tooling is present, and when the session was
-// hinted within the last hintSessionTTL. Best-effort: it writes only to stderr
-// and never fails the command.
+// hinted within the last hintSessionTTL. Best-effort: it never fails the
+// command. Besides the stderr line, it logs a telemetry event for each hint
+// shown, which makes a command that resolved auth upload telemetry at exit.
 func MaybeHint(ctx context.Context, cmd *cobra.Command) {
 	if useragent.AgentProvider() != claudeAgentProvider {
 		return
@@ -72,6 +74,7 @@ func MaybeHint(ctx context.Context, cmd *cobra.Command) {
 		return
 	}
 	cmdio.LogString(ctx, hintText)
+	logHintShown(ctx, protos.AitoolsHintKindInstallText)
 	recordSessionHint(ctx)
 }
 

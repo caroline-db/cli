@@ -37,6 +37,20 @@ func HasDatabricksSkillsInstalled(ctx context.Context) bool {
 		HasDatabricksSkillsIn(filepath.Join(homeDir, LegacySkillsDir))
 }
 
+// HasDatabricksToolingInstalled reports whether the detected agents already
+// have Databricks tooling, so `apps init` has nothing to recommend: no agent is
+// detected, a detected agent has the databricks plugin in its own plugin
+// manifest (see DatabricksPluginVersion), or the skills are installed (see
+// HasDatabricksSkillsInstalled).
+func HasDatabricksToolingInstalled(ctx context.Context) bool {
+	for _, a := range DetectInstalled(ctx) {
+		if _, ok := a.DatabricksPluginVersion(ctx); ok {
+			return true
+		}
+	}
+	return HasDatabricksSkillsInstalled(ctx)
+}
+
 // HasDatabricksSkillsIn checks if dir contains a subdirectory starting with "databricks".
 // The CLI installs skills into an agent's skills dir as symlinks to the canonical
 // store, and os.ReadDir reports symlinks via Lstat (so IsDir is false for them), so

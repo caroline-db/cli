@@ -187,3 +187,36 @@ func TestHasDatabricksSkillsInstalledLegacyPath(t *testing.T) {
 
 	assert.True(t, HasDatabricksSkillsInstalled(t.Context()))
 }
+
+func TestHasDatabricksToolingInstalled(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		plugin bool
+		skills bool
+		want   bool
+	}{
+		{name: "plugin only", plugin: true, want: true},
+		{name: "skills only", skills: true, want: true},
+		{name: "neither", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			t.Setenv("HOME", tmpHome)
+			t.Setenv("USERPROFILE", tmpHome)
+			configDir := filepath.Join(tmpHome, ".claude")
+			require.NoError(t, os.MkdirAll(configDir, 0o755))
+			if tc.plugin {
+				writeManifest(t, configDir, `{"plugins":{"databricks@claude-plugins-official":[{"version":"0.2.6"}]}}`)
+			}
+			if tc.skills {
+				require.NoError(t, os.MkdirAll(filepath.Join(tmpHome, CanonicalSkillsDir, "databricks"), 0o755))
+			}
+
+			origRegistry := Registry
+			Registry = []*Agent{agentWithConfigDir(configDir)}
+			t.Cleanup(func() { Registry = origRegistry })
+
+			assert.Equal(t, tc.want, HasDatabricksToolingInstalled(t.Context()))
+		})
+	}
+}
